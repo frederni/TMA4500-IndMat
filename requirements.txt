@@ -1,0 +1,14 @@
+# Essentials
+numpy
+matplotlib
+pandas
+seaborn
+tqdm
+scipy
+scikit-learn
+
+# PyTorch
+torch
+torchvision
+torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
+
