@@ -2,7 +2,7 @@
 dataset/
 Scripts/
 share/
-pyenv.cfg
+pyvenv.cfg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
