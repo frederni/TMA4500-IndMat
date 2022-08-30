@@ -1,6 +1,6 @@
 # Project-specific ignores
 dataset/
-Scipts/
+Scripts/
 share/
 pyenv.cfg
 
