@@ -3,6 +3,7 @@ dataset/
 Scripts/
 share/
 pyvenv.cfg
+etc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

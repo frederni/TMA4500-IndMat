@@ -14,3 +14,7 @@ torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
 
 # Jupyter notebooks
 ipykernel
+
+# Black
+jupyter-black
+jupyter
