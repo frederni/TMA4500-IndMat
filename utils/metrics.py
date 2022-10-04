@@ -1,3 +1,6 @@
+import numpy as np
+import unittest
+
 def prec(k: int, preds: np.ndarray, true: np.ndarray) -> float:
     """Precision function with cutoff (k). Used for MAP@12 metric.
 
@@ -25,7 +28,7 @@ def MAPk(k, preds, true) -> float:
     ])
 
 # Tests
-import unittest
+
 class TestMetricFunctions(unittest.TestCase):
     def __init__(self, methodName: str = 'runTest') -> None:
         self.gt = np.array(['a', 'b', 'c', 'd', 'e'])
