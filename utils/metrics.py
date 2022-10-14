@@ -17,7 +17,8 @@ def prec(k: int, preds: np.ndarray, true: np.ndarray) -> float:
     return len(np.intersect1d(preds[:k], true))/k
 
 def rel(k: int, preds: np.ndarray, true: np.ndarray) -> int:
-    assert 0 < k <= len(preds), "k must be able to index preds!"
+    if k > len(preds):
+        k = len(preds) # TODO this might introduce errors?
     return int(preds[k-1] in true)
 
 def MAPk(k, preds, true) -> float:
