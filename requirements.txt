@@ -7,8 +7,8 @@ tqdm
 scipy
 scikit-learn
 cuda-python
-cudatoolkit
-
+# cudatoolkit
+fastai
 # PyTorch
 torch
 torchvision
