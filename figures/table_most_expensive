@@ -1,0 +1,11 @@
+\begin{tabular}{lrll}
+\toprule
+{} &  article\_id &               prod\_name & product\_type\_name \\
+\midrule
+37399 &   653551001 &    Benji leather jacket &            Jacket \\
+50826 &   697511001 &   PE LINDA LEATHER COAT &              Coat \\
+79375 &   797432001 &   CEMENT leather jacket &            Jacket \\
+83012 &   810872001 &   PQ AGDA LEATHER DRESS &             Dress \\
+89691 &   839478001 &  PQ SUSAN LEATHER TUNIC &             Dress \\
+\bottomrule
+\end{tabular}
