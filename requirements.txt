@@ -20,3 +20,5 @@ ipykernel
 # Black
 jupyter-black
 jupyter
+
+kaggle
