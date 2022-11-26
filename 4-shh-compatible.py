@@ -1,7 +1,7 @@
 
 
 # >>>>> IMPORTS
-import os, torch, importlib, functools
+import os, torch, importlib, functools, logging
 import numpy as np, pandas as pd, matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset
 from typing import Tuple, Any, Iterable
@@ -765,8 +765,51 @@ def main(
         torch.save(model.state_dict(), os.path.join("models", save_model))
     return last_valid_loss
 
+def load_kaggle_assets():
+    logging.debug("Loading assets from Kaggle to Markov ...")
+    from zipfile import ZipFile
+    from kaggle.api.kaggle_api_extended import KaggleApi
+    api = KaggleApi()
+    api.authenticate()
+    to_download = ["customers.csv", "transactions_train.csv", "articles.csv"]
+    pd_objects = []
+
+    for i, file in enumerate(to_download):
+        logging.debug("Downlodaing file", file)
+        api.competition_download_file(competition="h-and-m-personalized-fashion-recommendations",file_name=file)
+
+        zf = ZipFile(f"{file}.zip")
+        zf.extractall()
+        zf.close()
+
+        # Customers-file does not require dtype specification, the others do
+        if i==0:
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_csv(file, dtype={"article_id": str})
+        pd_objects.append(df)
+        # Remove files created from download now that it's loaded to memory
+        os.remove(file)
+        os.remove(f"{file}.zip")
+        logging.debug("Sucessfully loaded and removed", file)
+def load_from_gdrive(gd_id: str) -> Any:
+    """Assumes you want to download a trained model from google drive (big!)"""
+    import gdown
+    gdown.download(id=gd_id, output="tmp_model.pth")
+    
 
 if __name__ == "__main__":
+    logging.basicConfig(filename='markov_run.log', encoding='utf-8', level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s %(message)s')
+
+    logging.debug("Starting hyperparameter exploration of ")
+    alternative_hyperparam_exploration(
+        wds=(1e-4, 1e-3, 1e-2, 1e-1),
+        embszs=(10, 100, 500, 1000, int(1e4)),
+        lrs=(1e-5, 1e-4, 1e-3, 1e-2),
+        model_path="object_storage/dataset-2022.11.26.12.04.pckl",
+    )
+
     _ = main(
         save_model=True,
         # persisted_dataset_path="object_storage/dataset-2022.11.09.19.34.pckl",
