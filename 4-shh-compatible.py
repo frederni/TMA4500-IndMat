@@ -1,10 +1,8 @@
-
-
 # >>>>> IMPORTS
 import os, torch, importlib, functools, logging
-import numpy as np, pandas as pd, matplotlib.pyplot as plt
+import numpy as np, pandas as pd
 from torch.utils.data import DataLoader, Dataset
-from typing import Tuple, Any, Iterable
+from typing import Tuple, Any, Iterable, Union
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 from datetime import datetime
@@ -12,12 +10,17 @@ from dataclasses import dataclass
 from collections import defaultdict
 
 import utils.metrics as metric
+
 importlib.reload(metric)  # To caputre changes in metrics module
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # <<<<< IMPORTS
 
 # >>>>> PREPROCESSING
-def load_min_data(filename: str | Iterable):
+def load_min_data(filename: Union[str, Iterable]):
     dfs = []
     if isinstance(filename, str):
         filename = [filename]
@@ -26,6 +29,7 @@ def load_min_data(filename: str | Iterable):
         # All min-datasets have an index column which has to be dropped:
         dfs.append(df.drop(df.columns[0], axis=1))
     return dfs
+
 
 def clean_customer_data(df: pd.DataFrame):
     df = df.dropna(subset=["age"])
@@ -40,10 +44,12 @@ def clean_article_data(df):
     df.loc[df["index_group_no"] == 26, "index_group_no"] = 0
     return df
 
+
 # <<<<< PREPROCESSING
 
 
 # >>>>> DATA LOADING
+
 
 class Data_HM(Dataset):
     """This is the general HM Dataset class whose children are train-dataset and validation-dataset
@@ -61,8 +67,8 @@ class Data_HM(Dataset):
         df_articles: pd.DataFrame,
         df_customers: pd.DataFrame,
         batch_size: int,
-        train_portion: float | None = None,
-        test_portion: float | None = None,
+        train_portion: Union[float, None] = None,
+        test_portion: Union[float, None] = None,
         transform: Any = None,
         target_transform: Any = None,
     ) -> None:
@@ -178,9 +184,11 @@ class Data_HM(Dataset):
         subset = self.train if trainDL else self.val
         return DataLoader(dataset=subset, batch_size=self.batch_size)
 
+
 # <<<<< DATA LOADING
 
 # >>>>> MODEL DEFINITINON AND TRAINING
+
 
 class HM_model(torch.nn.Module):
     def __init__(self, num_customer, num_articles, embedding_size):
@@ -206,8 +214,107 @@ class HM_model(torch.nn.Module):
         return torch.sigmoid(dot_prod)
 
 
+class HM_neural(torch.nn.Module):
+    def __init__(
+        self,
+        num_customer: int,
+        num_articles: int,
+        num_age: int,
+        num_idxgroup: int,
+        num_garmentgroup: int,
+        embedding_size: int,
+        bias_nodes: bool,
+    ) -> None:
+        super().__init__()
+        self.customer_embed = torch.nn.Embedding(
+            num_embeddings=num_customer, embedding_dim=embedding_size
+        )
+        self.age_embed = torch.nn.Embedding(num_age, embedding_size)
+        self.article_embed = torch.nn.Embedding(
+            num_embeddings=num_articles, embedding_dim=embedding_size
+        )
+        self.indexgroup_embed = torch.nn.Embedding(num_idxgroup, embedding_size)
+        self.garmentgroup_embed = torch.nn.Embedding(num_garmentgroup, embedding_size)
+        if bias_nodes:
+            self.customer_bias = torch.nn.Embedding(num_customer, 1)
+            self.article_bias = torch.nn.Embedding(num_articles, 1)
+        else:
+            # They're added lienarly so this should give no effect
+            self.customer_bias = lambda row: 0
+            self.article_bias = lambda row: 0
+        self.article_MLP = torch.nn.Linear(embedding_size * 3, embedding_size)
+        self.customer_MLP = torch.nn.Linear(embedding_size * 2, embedding_size)
 
+        # self.layers = torch.nn.Sequential(
+        #     # 3 features: age (customer), index_group and garment_group (article)
+        #     # n_activations deaults to e.g. 100?
+        #     torch.nn.Linear(int((batch_size := 64) * 3), int(n_activations)),
+        #     torch.nn.ReLU(),
+        #     torch.nn.Linear(int(n_activations), 1),
+        # )
 
+    def article_transform(self, article, garment_group, index_group):
+        embeds = (
+            self.article_embed(article),
+            self.indexgroup_embed(index_group),
+            self.garmentgroup_embed(garment_group),
+        )
+        final_embedding = self.article_MLP(torch.cat(embeds, 1))
+        return torch.sigmoid(final_embedding)
+
+    def customer_transform(self, customer, age):
+        embeds = (self.customer_embed(customer), self.age_embed(age))
+        final_embedding = self.customer_MLP(torch.cat(embeds, 1))
+        return torch.sigmoid(final_embedding)
+
+    def forward(self, row):
+        customer, article, age, garment_group, index_group = [
+            row[:, i] for i in range(5)
+        ]
+        # Ugly hack:
+        garment_group = garment_group - 1001  # 1009 -> 8
+        index_group = index_group - 1  # also to zero-index
+        customer_matrix = self.customer_embed(
+            customer
+        )  # self.customer_transform(customer, age)
+        article_matrix = self.article_transform(article, garment_group, index_group)
+        biases = self.customer_bias(customer), self.article_bias(article)
+        x = (customer_matrix * article_matrix).sum(1, keepdim=True)
+        x = x + biases[0] + biases[1]
+        return torch.sigmoid(x)
+
+# Extends class Data_HM
+def _extend_row_data(
+    self: Data_HM, customer_rows: Iterable[str], article_rows: Iterable[str]
+) -> None:
+    customer_rows = ["customer_id"] + customer_rows
+    article_rows = ["article_id"] + article_rows
+
+    # Find original customer and article IDs present in dataset
+    df_decoded = self.df_id.copy()
+    df_decoded["article_id"] = self.le_art.inverse_transform(df_decoded["article_id"])
+    df_decoded["customer_id"] = self.le_cust.inverse_transform(
+        df_decoded["customer_id"]
+    )
+    enc_customers, enc_articles = load_kaggle_assets(to_download=['customers.csv', 'articles.csv'])
+    enc_customers = enc_customers[
+        enc_customers["customer_id"].isin(df_decoded["customer_id"])
+    ]
+    enc_articles = enc_articles[
+        enc_articles["article_id"].isin(df_decoded["article_id"])
+    ]
+
+    enc_customers["customer_id"] = self.le_cust.transform(enc_customers["customer_id"])
+    enc_articles["article_id"] = self.le_art.transform(enc_articles["article_id"])
+    df_ext = self.df_id.merge(enc_customers[customer_rows]).merge(
+        enc_articles[article_rows]
+    )
+    # Ensure that last column is the label
+    ordered_columns = df_ext.columns[df_ext.columns != "label"].append(
+        pd.Index(["label"])
+    )
+    logging.debug(f"df_id has been extended with {', '.join(customer_rows[1:]+article_rows[1:])}")
+    return df_ext[ordered_columns]
 
 def train_one_epoch(
     model: HM_model,
@@ -217,24 +324,30 @@ def train_one_epoch(
     loss,
     lr_scheduler,
     verbose: bool = False,
+    baseline: bool = True,
 ):
     epoch_loss = 0
     device = "cuda" if torch.cuda.is_available() else "cpu"
     for item in data.get_DataLoader(trainDL=True):
         item = tuple(t.to(device) for t in item)
         row, label = item
+        if not baseline:
+            row = row.int()  # For ext. model
         optimizer.zero_grad()
-        pred = model(row[:, 0], row[:, 1])
+        if not baseline:
+            pred = model(row)
+        else:
+            pred = model(row[:, 0], row[:, 1])
         loss_value = loss(pred.view(-1), torch.FloatTensor(label.tolist()).to(device))
         loss_value.backward()
         optimizer.step()
         epoch_loss += loss_value
     if verbose:
-        print(f"\t| Training loss for epoch {epoch_num+1}: {epoch_loss}")
+        logging.info(f"\t| Training loss for epoch {epoch_num+1}: {epoch_loss}")
     return epoch_loss
 
 
-def train(model, data, params):
+def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Uses binary cross entropy at the moment
     loss_metric = torch.nn.BCELoss().to(device)
@@ -252,7 +365,14 @@ def train(model, data, params):
     for epoch in tqdm(range(params.epochs)):
         model.train()
         epoch_loss = train_one_epoch(
-            model, data, epoch, optimizer, loss_metric, lr_scheduler, params.verbose
+            model,
+            data,
+            epoch,
+            optimizer,
+            loss_metric,
+            lr_scheduler,
+            params.verbose,
+            baseline,
         )
         if not epoch % params.validation_frequency:
             # Validate step
@@ -261,7 +381,11 @@ def train(model, data, params):
             for item in data.get_DataLoader(trainDL=False):
                 item = tuple(t.to(device) for t in item)
                 row, label = item
-                pred = model(row[:, 0], row[:, 1])
+                if not baseline:
+                    row = row.int()
+                    pred = model(row)
+                else:
+                    pred = model(row[:, 0], row[:, 1])
                 loss = loss_metric(
                     pred.view(-1), torch.FloatTensor(label.tolist()).to(device)
                 )
@@ -269,18 +393,9 @@ def train(model, data, params):
 
             lr_scheduler.step(valid_loss)  # Update lr scheduler
             if params.verbose:
-                print(f"Provisory results for epoch {epoch+1}:")
-                print(
-                    "Loss for training set",
-                    epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True)),
-                    sep="\t",
-                )
-                print(
-                    "Loss for validation set",
-                    valid_loss / len(data.get_DataLoader(trainDL=False)),
-                    sep="\t",
-                )
-                print("-" * 20)
+                logging.info(f"Provisory results for epoch {epoch+1}:")
+                logging.info(f"Loss for training set\t{epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))}")
+                logging.info(f"Loss for validation set\t{valid_loss / len(data.get_DataLoader(trainDL=False))}")
             if save_loss:
                 train_losses.append(
                     epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))
@@ -293,19 +408,26 @@ def train(model, data, params):
         save_dir = os.path.join("results", datetime.today().strftime("%Y.%m.%d.%H.%M"))
         if not os.path.isdir(save_dir):
             os.makedirs(save_dir)
+        filename = os.path.join(save_dir, f"losses_{fn_append}.csv")
         np.savetxt(
-            os.path.join(save_dir, f"losses_{fn_append}.csv"),
+            filename,
             np.transpose([train_losses, valid_losses]),
             delimiter=",",
         )
+        logging.debug(f"Saved losses for this run to {filename}")
+        if plot_loss:
+            plot_loss_results(filename,save=f"{'b' if baseline else 'e'}_{settings}.pdf", baseline=baseline)
+            os.remove(filename)
+            logging.debug("Removed csv file and stored plot")
     return valid_loss / len(data.get_DataLoader(trainDL=False))
+
 
 # <<<<< MODEL DEFINITION AND TRAINING
 
 
-
 # >>>>> UTILITIES
- 
+
+
 def time_pd_vs_np(n_negative, df) -> Tuple[float, float]:
     """Compute time it takes to sample n_negative negative transactions
 
@@ -354,11 +476,12 @@ def time_pd_vs_np(n_negative, df) -> Tuple[float, float]:
 
     return time_pd, time_np
 
+
 def plot_negative_sampling(
     start: int,
     stop: int,
     step: int = 1,
-    filename: str | None = None,
+    filename: Union[str, None] = None,
     persist_data: bool = True,
     cont_from_checkpoint: bool = True,
 ) -> None:
@@ -419,6 +542,7 @@ def plot_negative_sampling(
         plt.savefig(f"{filename}.pdf")
     plt.show()
 
+
 def save_dataset_obj(data: HM_model, dst: str) -> None:
     import pickle, os
 
@@ -427,6 +551,7 @@ def save_dataset_obj(data: HM_model, dst: str) -> None:
     with open(dst, "wb") as f:
         pickle.dump(data, f)
 
+
 def read_dataset_obj(src: str) -> Any:
     import pickle
 
@@ -434,64 +559,25 @@ def read_dataset_obj(src: str) -> Any:
         data = pickle.load(f)
     return data
 
-def plot_loss_results(lossfile):
+
+def plot_loss_results(
+    lossfile, which: str = "all", plot_title: bool = True, save: Union[str, None] = None, baseline: bool = True
+):
     res = pd.read_csv(lossfile, header=None)
-    plt.plot(res[0], label="Training loss")
-    plt.plot(res[1], label="Validation loss")
+    if which != "validation":
+        plt.plot(res[0], label="Training loss")
+    if which != "training":
+        plt.plot(res[1], label="Validation loss")
     plt.xlabel("Epoch number")
     plt.ylabel("Loss value")
-    plt.show()
-
-## Explore different hyperparameters and compare
-def heuristic_embedding_size(cardinality):
-    # https://github.com/fastai/fastai/blob/master/fastai/tabular/model.py#L12
-    return min(600, round(1.6 * cardinality**0.56))
-
-def explore_hyperparameters():
-    weight_decays = (1e-4, 1e-3, 1e-2, 1e-1)
-    embedding_size = (10, 100, 500, 1000, int(1e4))
-    lr_rates = (1e-5, 1e-4, 1e-3, 1e-2)
-    print("Testing EMBEDDING SIZE")
-    for emb_size in embedding_size:
-        testing_param = f"{emb_size = }"
-        print(testing_param)
-        hparams = Hyperparameters(embedding_size=emb_size, save_loss=testing_param)
-        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
-    print("Testing WEIGHT DECAYS")
-    for wd in weight_decays:
-        testing_param = f"{wd = }"
-        print(testing_param)
-        hparams = Hyperparameters(weight_decay=wd, save_loss=testing_param)
-        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
-    for lr in lr_rates:
-        testing_param = f"{lr = }"
-        print(testing_param)
-        hparams = Hyperparameters(lr_rate=lr, save_loss=testing_param)
-        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
-
-def alternative_hyperparam_exploration(wds, embszs, lrs, model_path=None):
-    best_model = {}
-    best_loss = np.inf
-    for emb_size in embszs:
-        for wd in wds:
-            for lr in lrs:
-                params = {
-                    "embedding_size": emb_size,
-                    "epochs": 20,
-                    "save_loss": False,
-                    "weight_decay": wd,
-                    "lr_rate": lr,
-                }
-                loss = main(
-                    persisted_dataset_path=model_path,
-                    hyperparams=Hyperparameters(**params),
-                )
-                print("Last epoch loss", loss)
-                if loss < best_loss:
-                    best_model = params
-                    best_loss = loss
-                    print("Found better model", best_model)
-    return best_model
+    plt.legend()
+    title = "Training and validation" if which == "all" else which.capitalize()
+    title += f" loss for {'baseline' if baseline else 'extended'} model"
+    if plot_title:
+        plt.title(title)
+    if save is not None:
+        plt.savefig(save)
+    # plt.show()
 
 
 def compare_hyperparameter_results(data: Iterable[str]):
@@ -516,6 +602,7 @@ def compare_hyperparameter_results(data: Iterable[str]):
         plt.title(f"Training loss loss for different choices of {var}")
         plt.savefig(f"hyperparams_train_{var}.pdf")
         plt.show()
+
 
 def get_specific_file_locations():
     files_20epochs = [
@@ -546,14 +633,116 @@ def get_specific_file_locations():
     ]
     return files_20epochs, files
 
+
+## Explore different hyperparameters and compare
+def heuristic_embedding_size(cardinality):
+    # https://github.com/fastai/fastai/blob/master/fastai/tabular/model.py#L12
+    return min(600, round(1.6 * cardinality**0.56))
+
+
+def explore_hyperparameters():
+    weight_decays = (1e-4, 1e-3, 1e-2, 1e-1)
+    embedding_size = (10, 100, 500, 1000, int(1e4))
+    lr_rates = (1e-5, 1e-4, 1e-3, 1e-2)
+    print("Testing EMBEDDING SIZE")
+    for emb_size in embedding_size:
+        testing_param = f"{emb_size = }"
+        print(testing_param)
+        hparams = Hyperparameters(embedding_size=emb_size, save_loss=testing_param)
+        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+    print("Testing WEIGHT DECAYS")
+    for wd in weight_decays:
+        testing_param = f"{wd = }"
+        print(testing_param)
+        hparams = Hyperparameters(weight_decay=wd, save_loss=testing_param)
+        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+    for lr in lr_rates:
+        testing_param = f"{lr = }"
+        print(testing_param)
+        hparams = Hyperparameters(lr_rate=lr, save_loss=testing_param)
+        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+
+
+def alternative_hyperparam_exploration(
+    wds, embszs, lrs, dataset_path=None, baseline: bool = True
+):
+    best_model = {}
+    best_loss = np.inf
+    for emb_size in embszs:
+        for wd in wds:
+            for lr in lrs:
+                params = {
+                    "embedding_size": emb_size,
+                    "epochs": 20, 
+                    "save_loss": True,
+                    "weight_decay": wd,
+                    "lr_rate": lr,
+                    "verbose": True
+                }
+                logging.debug(
+                    f"Training 20 epochs of {'baseline' if baseline else 'extended'} model. Settings: {lr = }, {wd = }, {emb_size = }"
+                )
+                loss = main(
+                    persisted_dataset_path=dataset_path,
+                    hyperparams=Hyperparameters(**params),
+                    baseline=baseline,
+                )
+                logging.debug(f"Last epoch loss: {loss}")
+                if loss < best_loss:
+                    best_model = params
+                    best_loss = loss
+                    logging.debug(f"Found better model:\n{best_model}\n--")
+    return best_model
+
+
 def split_test_set_file():
-    import numpy as np, pandas as pd, torch
     full_set = pd.read_csv("dataset/transactions_train.csv", dtype={"article_id": str})
-    num_train = int(len(full_set)*0.7)
+    num_train = int(len(full_set) * 0.7)
     num_test = len(full_set) - num_train
-    test_idx = np.random.randint(0, len(full_set),size=num_test)
+    test_idx = np.random.randint(0, len(full_set), size=num_test)
     full_set.iloc[test_idx].to_csv("dataset/tr_test.csv")
-    full_set.drop(test_idx).to_csv("dataset/tr_train.csv")    
+    full_set.drop(test_idx).to_csv("dataset/tr_train.csv")
+
+
+def load_kaggle_assets(to_download: Union[Iterable[str], None] = None) -> Iterable[pd.DataFrame]:
+    logging.debug("Loading assets from Kaggle to Markov ...")
+    from zipfile import ZipFile
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    api = KaggleApi()
+    api.authenticate()
+    if to_download is None:
+        to_download = ["customers.csv", "transactions_train.csv", "articles.csv"]
+    pd_objects = []
+
+    for i, file in enumerate(to_download):
+        logging.debug(f"Downlodaing file {file}")
+        api.competition_download_file(
+            competition="h-and-m-personalized-fashion-recommendations", file_name=file
+        )
+
+        zf = ZipFile(f"{file}.zip")
+        zf.extractall()
+        zf.close()
+
+        # Customers-file does not require dtype specification, the others do
+        if i == 0:
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_csv(file, dtype={"article_id": str})
+        pd_objects.append(df)
+        # Remove files created from download now that it's loaded to memory
+        os.remove(file)
+        os.remove(f"{file}.zip")
+        logging.debug(f"Sucessfully loaded and removed {file}")
+    return pd_objects
+
+
+def load_from_gdrive(gd_id: str) -> Any:
+    """Assumes you want to download a trained model from google drive (big!)"""
+    import gdown
+
+    gdown.download(id=gd_id, output="tmp_model.pth")
 
 
 # <<<<< UTILITIES
@@ -700,9 +889,9 @@ class Hyperparameters:
     validation_frequency: int = 1
     optimizer: Any = torch.optim.Adam
     embedding_size: int = 500
-    save_loss: bool | str = True
+    save_loss: Union[bool, str] = True
     verbose: bool = False
-    dataset_cases: int = 2000
+    dataset_cases: int = 2000  # These have no use if dataset is loaded from file
     dataset_portion_negatives: float = 0.9
     dataset_train_portion: float = 0.7
     datset_batch_size: int = 5
@@ -711,11 +900,13 @@ class Hyperparameters:
 
 def main(
     use_min_dataset: bool = False,
-    persisted_dataset_path: str | None = None,
-    save_model: str | bool = False,
+    persisted_dataset_path: Union[str, None] = None,
+    save_model: Union[str, bool] = False,
     hyperparams=Hyperparameters(),
     transactions_path: str = "dataset/transactions_train.csv",
+    baseline: bool = True,
 ):
+    """This basically just loads the data files, database object and runs train. Will also save trained model"""
 
     # Load data
     if use_min_dataset:
@@ -749,79 +940,70 @@ def main(
         )
     else:
         data = read_dataset_obj(persisted_dataset_path)
-    n_cust, n_art, _ = data.df_id.nunique()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = HM_model(
-        num_customer=n_cust,
-        num_articles=n_art,
-        embedding_size=hyperparams.embedding_size,
-    )
-    model = model.to(device)
+        logging.debug("Read dataset successfully")
 
-    last_valid_loss = train(model, data, hyperparams)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if baseline:
+        n_cust, n_art, _ = data.df_id.nunique()
+        model = HM_model(
+            num_customer=n_cust,
+            num_articles=n_art,
+            embedding_size=hyperparams.embedding_size,
+        ).to(device)
+    else:
+        logging.debug("Transforming df_id to work for extended model")
+        data.df_id = _extend_row_data(data, ["age"], ["garment_group_no", "index_group_no"])
+        n_cust, n_art, *_ = data.df_id.nunique()
+        # age/idxgroup/ggroup have to be the max instead of nunique
+        n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
+
+        model = HM_neural(
+            num_customer=n_cust,
+            num_articles=n_art,
+            num_age=n_age,
+            num_idxgroup=n_idxgroup,
+            num_garmentgroup=n_garmentgroup,
+            embedding_size=hyperparams.embedding_size,
+            bias_nodes=True,
+        ).to(device)
+    logging.debug("Created model sucessfully")
+    last_valid_loss = train(model, data, hyperparams, baseline,plot_loss=True)
     if save_model:
         if isinstance(save_model, bool):
             save_model = datetime.today().strftime("%Y.%m.%d.%H.%M") + ".pth"
         torch.save(model.state_dict(), os.path.join("models", save_model))
     return last_valid_loss
 
-def load_kaggle_assets():
-    logging.debug("Loading assets from Kaggle to Markov ...")
-    from zipfile import ZipFile
-    from kaggle.api.kaggle_api_extended import KaggleApi
-    api = KaggleApi()
-    api.authenticate()
-    to_download = ["customers.csv", "transactions_train.csv", "articles.csv"]
-    pd_objects = []
-
-    for i, file in enumerate(to_download):
-        logging.debug("Downlodaing file", file)
-        api.competition_download_file(competition="h-and-m-personalized-fashion-recommendations",file_name=file)
-
-        zf = ZipFile(f"{file}.zip")
-        zf.extractall()
-        zf.close()
-
-        # Customers-file does not require dtype specification, the others do
-        if i==0:
-            df = pd.read_csv(file)
-        else:
-            df = pd.read_csv(file, dtype={"article_id": str})
-        pd_objects.append(df)
-        # Remove files created from download now that it's loaded to memory
-        os.remove(file)
-        os.remove(f"{file}.zip")
-        logging.debug("Sucessfully loaded and removed", file)
-def load_from_gdrive(gd_id: str) -> Any:
-    """Assumes you want to download a trained model from google drive (big!)"""
-    import gdown
-    gdown.download(id=gd_id, output="tmp_model.pth")
-    
 
 if __name__ == "__main__":
-    logging.basicConfig(filename='markov_run.log', encoding='utf-8', level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s %(message)s')
-
-    logging.debug("Starting hyperparameter exploration of ")
-    alternative_hyperparam_exploration(
-        wds=(1e-4, 1e-3, 1e-2, 1e-1),
-        embszs=(10, 100, 500, 1000, int(1e4)),
-        lrs=(1e-5, 1e-4, 1e-3, 1e-2),
-        model_path="object_storage/dataset-2022.11.26.12.04.pckl",
+    logging.basicConfig(
+        filename="markov_run.log",
+        #encoding="utf-8", # Not present in Python 3.8...
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(message)s",
     )
-
-    _ = main(
-        save_model=True,
-        # persisted_dataset_path="object_storage/dataset-2022.11.09.19.34.pckl",
-        # transactions_path="dataset/tr_train.csv",
-        hyperparams=Hyperparameters(
-            epochs=20,
-            weight_decay=0.0001,
-            lr_rate=0.01,
-            embedding_size=500,
-            save_loss=True,
-            dataset_cases=200_000,  # TODO change when ready for the entire chablam
-            dataset_portion_negatives=0.5,  # TODO consider changing
-            datset_batch_size=64,
-        ),
-    )
+    logging.debug("Starting param exploration for extended model")
+    try:
+        alternative_hyperparam_exploration(
+            wds=(1e-4, 1e-3, 1e-2, 1e-1),
+            embszs=(10, 100, 500, 1000, int(1e4)),
+            lrs=(1e-5, 1e-4, 1e-3, 1e-2),
+            dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+            baseline=False,
+        )
+    except Exception as e:
+        logging.exception(f"Traceback in main! {e}")
+        raise e
+    
+    logging.debug("Starting hyperparameter exploration of baseline")
+    try:
+        alternative_hyperparam_exploration(
+            wds=(1e-4, 1e-3, 1e-2, 1e-1),
+            embszs=(10, 100, 500, 1000, int(1e4)),
+            lrs=(1e-5, 1e-4, 1e-3, 1e-2),
+            dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+            baseline=True,
+        )
+    except Exception as e:
+        logging.exception(f"Traceback in main! {e}")
+        raise e

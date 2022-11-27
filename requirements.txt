@@ -2,24 +2,30 @@
 numpy
 matplotlib
 pandas
-seaborn
+#seaborn
 tqdm
-scipy
+#scipy
 scikit-learn
-cuda-python
+
 # cudatoolkit
-fastai
+#fastai
 # PyTorch
 torch
 torchvision
-torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
+torchaudio --extra-index-url https://download.pytorch.org/whl/cpu # CPU-based
+
+# # For using CUDA:
+# torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
+# cuda-python
 
 # Jupyter notebooks
-ipykernel
+#ipykernel
 
 # Black
-jupyter-black
-jupyter
+#jupyter-black
+#jupyter
 
-kaggle
-gdown
+
+# Special cases only, downloading online:
+# kaggle
+# gdown
