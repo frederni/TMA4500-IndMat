@@ -14,13 +14,15 @@ import utils.metrics as metric
 importlib.reload(metric)  # To caputre changes in metrics module
 
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")  # Backend for SSH runs
 import matplotlib.pyplot as plt
 
 # <<<<< IMPORTS
 
 # >>>>> PREPROCESSING
 def load_min_data(filename: Union[str, Iterable]):
+    """Helper to load minimzed datasets with only 2000 samples, for testing"""
     dfs = []
     if isinstance(filename, str):
         filename = [filename]
@@ -32,6 +34,7 @@ def load_min_data(filename: Union[str, Iterable]):
 
 
 def clean_customer_data(df: pd.DataFrame):
+    """Helper to remove NAs from Age and use of consistent labeling"""
     df = df.dropna(subset=["age"])
     df.loc[
         ~df["fashion_news_frequency"].isin(["Regularly", "Monthly"]),
@@ -41,6 +44,7 @@ def clean_customer_data(df: pd.DataFrame):
 
 
 def clean_article_data(df):
+    """Helper that maps index group number `26' to 0 for easier label encoding"""
     df.loc[df["index_group_no"] == 26, "index_group_no"] = 0
     return df
 
@@ -64,8 +68,6 @@ class Data_HM(Dataset):
         total_cases: int,
         portion_negatives: float,
         df_transactions: pd.DataFrame,
-        df_articles: pd.DataFrame,
-        df_customers: pd.DataFrame,
         batch_size: int,
         train_portion: Union[float, None] = None,
         test_portion: Union[float, None] = None,
@@ -87,7 +89,7 @@ class Data_HM(Dataset):
 
     def generate_dataset(
         self, total_cases: int, portion_negatives: float, df_transactions: pd.DataFrame
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> Tuple[pd.DataFrame, LabelEncoder, LabelEncoder]:
         """Produce DataFrames for positive labels and generated negative samples
 
         Args:
@@ -96,12 +98,15 @@ class Data_HM(Dataset):
             df_transactions (pd.DataFrame): Transactions to pull samples/generate samples from
 
         Returns:
-            Tuple[pd.DataFrame, pd.DataFrame]: _description_
+            Tuple[pd.DataFrame, LabelEncoder, LabelEncoder]:
+                * DataFrame on form (customer, article, label) where the IDs are label-encoded,
+                * Customer and article LabelEncoder objects
         """
         assert (
             0 <= portion_negatives <= 1
         ), r"portion negatives must be a float between 0%=0.0 and 100%=1.0!"
         if total_cases is None:
+            # Defaults to using all cases
             total_cases = len(df_transactions)
         n_positive = round(total_cases * (1 - portion_negatives))
         n_negative = total_cases - n_positive
@@ -122,6 +127,7 @@ class Data_HM(Dataset):
                 sample = [
                     np.random.choice(df_np[:, col]) for col in range(df_np.shape[1])
                 ]
+                # Checking if random sample actually exists:
                 legit = not (
                     (df_np[:, 0] == sample[0]) & (df_np[:, 1] == sample[1])
                 ).any()
@@ -177,10 +183,18 @@ class Data_HM(Dataset):
         return train, val
 
     def get_data_from_subset(self, subset: torch.utils.data.Subset):
-        """Not in use currently, but can retrieve data from Subset object directly"""
+        """Retrieve data from Subset object directly"""
         return subset.dataset.df_id.iloc[subset.indices]
 
     def get_DataLoader(self, trainDL: bool = True):
+        """Retrieve DataLoader object for either train or validation set.
+
+        Args:
+            trainDL (bool, optional): Flag to determine which set to load. Defaults to True.
+
+        Returns:
+            DataLoader: Torch DataLoader
+        """
         subset = self.train if trainDL else self.val
         return DataLoader(dataset=subset, batch_size=self.batch_size)
 
@@ -191,6 +205,7 @@ class Data_HM(Dataset):
 
 
 class HM_model(torch.nn.Module):
+    """Baseline HM model"""
     def __init__(self, num_customer, num_articles, embedding_size):
         super(HM_model, self).__init__()
         self.customer_embed = torch.nn.Embedding(
@@ -203,6 +218,15 @@ class HM_model(torch.nn.Module):
         self.article_bias = torch.nn.Embedding(num_articles, 1)
 
     def forward(self, customer_row, article_row):
+        """The forward pass used in model training (matrix factorization)
+
+        Args:
+            customer_row (Tensor): Tensor of (batch of) customer row(s)
+            article_row (Tensor): Tensor of (batch of) article row(s)
+
+        Returns:
+            Tensor: Activation of U@V^T + B_u + B_v
+        """
         customer_embed = self.customer_embed(customer_row)
         art_embed = self.art_embed(article_row)
         # dot_prod_old = torch.sum(torch.mul(customer_embed, art_embed), 1)
@@ -214,7 +238,8 @@ class HM_model(torch.nn.Module):
         return torch.sigmoid(dot_prod)
 
 
-class HM_neural(torch.nn.Module):
+class HM_neural(torch.nn.Module): # TODO this can inherit from HM_model instead
+    """Extended model"""
     def __init__(
         self,
         num_customer: int,
@@ -229,11 +254,11 @@ class HM_neural(torch.nn.Module):
         self.customer_embed = torch.nn.Embedding(
             num_embeddings=num_customer, embedding_dim=embedding_size
         )
-        self.age_embed = torch.nn.Embedding(num_age, embedding_size)
+        self.age_embed = torch.nn.Embedding(num_age, embedding_size) # New
         self.article_embed = torch.nn.Embedding(
             num_embeddings=num_articles, embedding_dim=embedding_size
         )
-        self.indexgroup_embed = torch.nn.Embedding(num_idxgroup, embedding_size)
+        self.indexgroup_embed = torch.nn.Embedding(num_idxgroup, embedding_size) # New
         self.garmentgroup_embed = torch.nn.Embedding(num_garmentgroup, embedding_size)
         if bias_nodes:
             self.customer_bias = torch.nn.Embedding(num_customer, 1)
@@ -242,6 +267,7 @@ class HM_neural(torch.nn.Module):
             # They're added lienarly so this should give no effect
             self.customer_bias = lambda row: 0
             self.article_bias = lambda row: 0
+        # Linear layers from side-info to user/item matrix
         self.article_MLP = torch.nn.Linear(embedding_size * 3, embedding_size)
         self.customer_MLP = torch.nn.Linear(embedding_size * 2, embedding_size)
 
@@ -251,7 +277,7 @@ class HM_neural(torch.nn.Module):
         #     torch.nn.Linear(int((batch_size := 64) * 3), int(n_activations)),
         #     torch.nn.ReLU(),
         #     torch.nn.Linear(int(n_activations), 1),
-        # )
+        # ) # TODO delete this if not relevant
 
     def article_transform(self, article, garment_group, index_group):
         embeds = (
@@ -271,22 +297,30 @@ class HM_neural(torch.nn.Module):
         customer, article, age, garment_group, index_group = [
             row[:, i] for i in range(5)
         ]
-        # Ugly hack:
+        # Manipulate IDs to be zero-indexed # TODO improve this so it's not on each forward pass (not a priority)
         garment_group = garment_group - 1001  # 1009 -> 8
         index_group = index_group - 1  # also to zero-index
-        customer_matrix = self.customer_embed(
-            customer
-        )  # self.customer_transform(customer, age)
+        customer_matrix = self.customer_transform(customer, age)
         article_matrix = self.article_transform(article, garment_group, index_group)
         biases = self.customer_bias(customer), self.article_bias(article)
         x = (customer_matrix * article_matrix).sum(1, keepdim=True)
         x = x + biases[0] + biases[1]
         return torch.sigmoid(x)
 
-# Extends class Data_HM
+
 def _extend_row_data(
     self: Data_HM, customer_rows: Iterable[str], article_rows: Iterable[str]
-) -> None:
+) -> pd.DataFrame:
+    """Adds the given customer/article rows to dataset-object (not in-place)
+
+    Args:
+        self (Data_HM): Main dataset object
+        customer_rows (Iterable[str]): List of column names of customer info
+        article_rows (Iterable[str]): List of column names of article info
+
+    Returns:
+        pd.DataFrame: Modified self.df_id with the additional info
+    """
     customer_rows = ["customer_id"] + customer_rows
     article_rows = ["article_id"] + article_rows
 
@@ -296,7 +330,9 @@ def _extend_row_data(
     df_decoded["customer_id"] = self.le_cust.inverse_transform(
         df_decoded["customer_id"]
     )
-    enc_customers, enc_articles = load_kaggle_assets(to_download=['customers.csv', 'articles.csv'])
+    enc_customers, enc_articles = load_kaggle_assets(
+        to_download=["customers.csv", "articles.csv"]
+    )
     enc_customers = enc_customers[
         enc_customers["customer_id"].isin(df_decoded["customer_id"])
     ]
@@ -313,8 +349,11 @@ def _extend_row_data(
     ordered_columns = df_ext.columns[df_ext.columns != "label"].append(
         pd.Index(["label"])
     )
-    logging.debug(f"df_id has been extended with {', '.join(customer_rows[1:]+article_rows[1:])}")
+    logging.debug(
+        f"df_id has been extended with {', '.join(customer_rows[1:]+article_rows[1:])}"
+    )
     return df_ext[ordered_columns]
+
 
 def train_one_epoch(
     model: HM_model,
@@ -322,7 +361,6 @@ def train_one_epoch(
     epoch_num: int,
     optimizer,
     loss,
-    lr_scheduler,
     verbose: bool = False,
     baseline: bool = True,
 ):
@@ -370,7 +408,6 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
             epoch,
             optimizer,
             loss_metric,
-            lr_scheduler,
             params.verbose,
             baseline,
         )
@@ -394,8 +431,12 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
             lr_scheduler.step(valid_loss)  # Update lr scheduler
             if params.verbose:
                 logging.info(f"Provisory results for epoch {epoch+1}:")
-                logging.info(f"Loss for training set\t{epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))}")
-                logging.info(f"Loss for validation set\t{valid_loss / len(data.get_DataLoader(trainDL=False))}")
+                logging.info(
+                    f"Loss for training set\t{epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))}"
+                )
+                logging.info(
+                    f"Loss for validation set\t{valid_loss / len(data.get_DataLoader(trainDL=False))}"
+                )
             if save_loss:
                 train_losses.append(
                     epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))
@@ -416,9 +457,13 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
         )
         logging.debug(f"Saved losses for this run to {filename}")
         if plot_loss:
-            plot_loss_results(filename,save=f"{'b' if baseline else 'e'}_{settings}.pdf", baseline=baseline)
-            os.remove(filename)
-            logging.debug("Removed csv file and stored plot")
+            plot_loss_results(
+                filename,
+                save=f"{'b' if baseline else 'e'}_{settings}.pdf",
+                baseline=baseline,
+            )
+            # os.remove(filename) # Fallback in case plotting doesnt work again
+            # logging.debug("Removed csv file and stored plot")
     return valid_loss / len(data.get_DataLoader(trainDL=False))
 
 
@@ -544,7 +589,6 @@ def plot_negative_sampling(
 
 
 def save_dataset_obj(data: HM_model, dst: str) -> None:
-    import pickle, os
 
     if not os.path.isdir(os.path.dirname(dst)):
         os.makedirs(os.path.dirname(dst))
@@ -561,9 +605,14 @@ def read_dataset_obj(src: str) -> Any:
 
 
 def plot_loss_results(
-    lossfile, which: str = "all", plot_title: bool = True, save: Union[str, None] = None, baseline: bool = True
+    lossfile,
+    which: str = "all",
+    plot_title: bool = True,
+    save: Union[str, None] = None,
+    baseline: bool = True,
 ):
     res = pd.read_csv(lossfile, header=None)
+    plt.figure()
     if which != "validation":
         plt.plot(res[0], label="Training loss")
     if which != "training":
@@ -649,18 +698,18 @@ def explore_hyperparameters():
         testing_param = f"{emb_size = }"
         print(testing_param)
         hparams = Hyperparameters(embedding_size=emb_size, save_loss=testing_param)
-        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+        load_dataset_and_train(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
     print("Testing WEIGHT DECAYS")
     for wd in weight_decays:
         testing_param = f"{wd = }"
         print(testing_param)
         hparams = Hyperparameters(weight_decay=wd, save_loss=testing_param)
-        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+        load_dataset_and_train(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
     for lr in lr_rates:
         testing_param = f"{lr = }"
         print(testing_param)
         hparams = Hyperparameters(lr_rate=lr, save_loss=testing_param)
-        main(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+        load_dataset_and_train(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
 
 
 def alternative_hyperparam_exploration(
@@ -673,19 +722,21 @@ def alternative_hyperparam_exploration(
             for lr in lrs:
                 params = {
                     "embedding_size": emb_size,
-                    "epochs": 20, 
+                    "epochs": 20,
                     "save_loss": True,
                     "weight_decay": wd,
                     "lr_rate": lr,
-                    "verbose": True
+                    "verbose": True,
+                    "validation_frequency": 1,
                 }
                 logging.debug(
                     f"Training 20 epochs of {'baseline' if baseline else 'extended'} model. Settings: {lr = }, {wd = }, {emb_size = }"
                 )
-                loss = main(
+                loss = load_dataset_and_train(
                     persisted_dataset_path=dataset_path,
                     hyperparams=Hyperparameters(**params),
                     baseline=baseline,
+                    save_model=True,
                 )
                 logging.debug(f"Last epoch loss: {loss}")
                 if loss < best_loss:
@@ -704,7 +755,9 @@ def split_test_set_file():
     full_set.drop(test_idx).to_csv("dataset/tr_train.csv")
 
 
-def load_kaggle_assets(to_download: Union[Iterable[str], None] = None) -> Iterable[pd.DataFrame]:
+def load_kaggle_assets(
+    to_download: Union[Iterable[str], None] = None
+) -> Iterable[pd.DataFrame]:
     logging.debug("Loading assets from Kaggle to Markov ...")
     from zipfile import ZipFile
     from kaggle.api.kaggle_api_extended import KaggleApi
@@ -751,7 +804,7 @@ def load_from_gdrive(gd_id: str) -> Any:
 
 
 @torch.inference_mode()
-def inference_alternative(model_path, test_data, k: int = 12) -> Tuple[dict, object]:
+def inference_alternative(model_path, test_data, k: int = 12, baseline: bool = False, n_customer_threshold: int = 100) -> Tuple[dict, object]:
     """Make dictionary on form {customer: [art_1, ..., art_k]} for k highest predicted articles,
     for each customer and article in the *validation set*"""
 
@@ -769,7 +822,10 @@ def inference_alternative(model_path, test_data, k: int = 12) -> Tuple[dict, obj
     all_preds = defaultdict(dict)
     # Best preds now just finds the label-encoded stuff since we already have LF on those
     device = "cpu"
-    model = HM_model(num_customer, num_articles, embedding_size=500).to(device)
+    if baseline:
+        model = HM_model(num_customer, num_articles, embedding_size=500).to(device) # TODO must be changed to work for extended as well
+    else:
+        model = HM_neural(num_customer, num_articles, num_age,num_idxgroup,num_garmentgroup,embedding_size=500,bias_nodes=True)
     model.load_state_dict(torch.load(model_path, map_location=torch.device(device)))
     model.eval()
 
@@ -787,7 +843,7 @@ def inference_alternative(model_path, test_data, k: int = 12) -> Tuple[dict, obj
         valid_articles, ceil(valid_articles.shape[0] / test_data.batch_size)
     )
     out_dict = dict()
-    print("Computing predictions for customers ...")
+    logging.info("Computing predictions for customers ...")
     customer_count = 0
     for customer in tqdm(valid_customers):
         customer_count += 1
@@ -796,14 +852,14 @@ def inference_alternative(model_path, test_data, k: int = 12) -> Tuple[dict, obj
             pred = model(customer_exp, article).view(-1)
             for i, pred_i in enumerate(pred):
                 all_preds[customer.item()][article[i]] = pred_i
-        if customer_count % 100 == 0:
-            # print("Sending batch to out dict...")
+        if customer_count % n_customer_threshold == 0:
+            logging.debug("Sending batch to out dict...")
             _update_out_dict(all_preds)
             # Free memory and re-initiate defaultdict
             del all_preds
             all_preds = defaultdict(dict)
 
-    # Call this once more for the last n<100 customers
+    # Call this once more for the last n<n_customer_threshold customers
     _update_out_dict(all_preds)
     return out_dict
 
@@ -813,12 +869,10 @@ def compute_map(
     best_preds: dict,
     test_data: Data_HM,
     k: int = 12,
-    use_all_data_as_ground_truth: bool = False,
-    verbose: bool = False,
+    use_all_data_as_ground_truth: bool = False
 ):
-    vprint = lambda *args: print(*args) if verbose else None
     if use_all_data_as_ground_truth:
-        vprint("Returning best predicted values back to true IDs ...")
+        logging.debug("Returning best predicted values back to true IDs ...")
         decoded_preds = dict()
         for k, v in best_preds.items():
             unenc_k = test_data.le_cust.inverse_transform([k])[0]
@@ -827,7 +881,7 @@ def compute_map(
         best_preds = decoded_preds  # Overwrites best_preds
 
         # Ground truth from entire database:
-        vprint("Reading ground truth ...")
+        logging.debug("Reading ground truth ...")
         ground_truth = pd.read_csv(
             "dataset/transactions_train.csv",
             dtype={"article_id": str},
@@ -840,7 +894,7 @@ def compute_map(
             ground_truth.groupby("customer_id").agg({"article_id": list}).reset_index()
         )
     else:
-        vprint("Loading only data in validation set")
+        logging.debug("Loading only data in validation set")
         ground_truth = (  # This only checks the true values of the validation set
             test_data.df_id[test_data.df_id["label"] == 1]
             .groupby("customer_id")
@@ -850,18 +904,13 @@ def compute_map(
 
     preds = pd.DataFrame.from_dict(best_preds, orient="index").reset_index()
     preds.columns = ["customer_id", "est_article_id"]
-    vprint(
-        "Value counts before removing article duplicates\n",
-        ground_truth["article_id"].apply(len).value_counts().to_dict(),
-    )
+    logging.debug(f"Value counts before removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}")
+    
     # Remove duplicates
     ground_truth["article_id"] = ground_truth["article_id"].apply(
         lambda c: list(set(c))
     )
-    vprint(
-        "Value counts after removing article duplicates\n",
-        ground_truth["article_id"].apply(len).value_counts().to_dict(),
-    )
+    logging.debug(f"Value counts after removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}")
 
     merged = ground_truth.merge(preds)
     from utils.metrics import prec, rel
@@ -891,14 +940,15 @@ class Hyperparameters:
     embedding_size: int = 500
     save_loss: Union[bool, str] = True
     verbose: bool = False
-    dataset_cases: int = 2000  # These have no use if dataset is loaded from file
+    # These have no use if dataset is loaded from file
+    dataset_cases: int = 2000  
     dataset_portion_negatives: float = 0.9
     dataset_train_portion: float = 0.7
     datset_batch_size: int = 5
     # Add more here...
 
 
-def main(
+def load_dataset_and_train(
     use_min_dataset: bool = False,
     persisted_dataset_path: Union[str, None] = None,
     save_model: Union[str, bool] = False,
@@ -928,8 +978,6 @@ def main(
             "total_cases": hyperparams.dataset_cases,
             "portion_negatives": hyperparams.dataset_portion_negatives,
             "df_transactions": df_t,
-            "df_articles": df_a,
-            "df_customers": df_c,
             "train_portion": hyperparams.dataset_train_portion,
             "batch_size": hyperparams.datset_batch_size,
         }
@@ -952,7 +1000,9 @@ def main(
         ).to(device)
     else:
         logging.debug("Transforming df_id to work for extended model")
-        data.df_id = _extend_row_data(data, ["age"], ["garment_group_no", "index_group_no"])
+        data.df_id = _extend_row_data(
+            data, ["age"], ["garment_group_no", "index_group_no"]
+        )
         n_cust, n_art, *_ = data.df_id.nunique()
         # age/idxgroup/ggroup have to be the max instead of nunique
         n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
@@ -967,7 +1017,7 @@ def main(
             bias_nodes=True,
         ).to(device)
     logging.debug("Created model sucessfully")
-    last_valid_loss = train(model, data, hyperparams, baseline,plot_loss=True)
+    last_valid_loss = train(model, data, hyperparams, baseline, plot_loss=True)
     if save_model:
         if isinstance(save_model, bool):
             save_model = datetime.today().strftime("%Y.%m.%d.%H.%M") + ".pth"
@@ -978,29 +1028,29 @@ def main(
 if __name__ == "__main__":
     logging.basicConfig(
         filename="markov_run.log",
-        #encoding="utf-8", # Not present in Python 3.8...
+        # encoding="utf-8", # Not present in Python 3.8...
         level=logging.DEBUG,
         format="%(asctime)s %(levelname)s %(message)s",
     )
     logging.debug("Starting param exploration for extended model")
     try:
         alternative_hyperparam_exploration(
-            wds=(1e-4, 1e-3, 1e-2, 1e-1),
-            embszs=(10, 100, 500, 1000, int(1e4)),
-            lrs=(1e-5, 1e-4, 1e-3, 1e-2),
+            wds=(1e-4, 1e-3, 1e-1),
+            embszs=(500, 100, 1000),
+            lrs=(1e-2, 1e-3, 1e-4),
             dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
             baseline=False,
         )
     except Exception as e:
         logging.exception(f"Traceback in main! {e}")
         raise e
-    
+
     logging.debug("Starting hyperparameter exploration of baseline")
     try:
         alternative_hyperparam_exploration(
-            wds=(1e-4, 1e-3, 1e-2, 1e-1),
-            embszs=(10, 100, 500, 1000, int(1e4)),
-            lrs=(1e-5, 1e-4, 1e-3, 1e-2),
+            wds=(1e-4, 1e-3, 1e-1),
+            embszs=(500, 100, 1000),
+            lrs=(1e-2, 1e-3, 1e-4),
             dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
             baseline=True,
         )
