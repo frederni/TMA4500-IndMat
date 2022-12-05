@@ -653,35 +653,6 @@ def compare_hyperparameter_results(data: Iterable[str]):
         plt.show()
 
 
-def get_specific_file_locations():
-    files_20epochs = [
-        "results/2022.10.24.11.33/losses_emb_size = 10.csv",
-        "results/2022.10.24.11.34/losses_emb_size = 100.csv",
-        "results/2022.10.24.11.39/losses_emb_size = 500.csv",
-        "results/2022.10.24.11.47/losses_emb_size = 1000.csv",
-        "results/2022.10.24.13.29/losses_wd = 0.0001.csv",
-        "results/2022.10.24.13.33/losses_wd = 0.001.csv",
-        "results/2022.10.24.13.37/losses_wd = 0.01.csv",
-        "results/2022.10.24.13.50/losses_lr = 0.001.csv",
-        "results/2022.10.24.13.56/losses_lr = 0.01.csv",
-    ]
-    files = [
-        "results/2022.10.30.21.21/losses_emb_size = 10.csv",
-        "results/2022.10.30.21.23/losses_emb_size = 100.csv",
-        "results/2022.10.30.21.24/losses_emb_size = 500.csv",
-        "results/2022.10.30.21.26/losses_emb_size = 1000.csv",
-        "results/2022.10.30.21.32/losses_emb_size = 10000.csv",
-        "results/2022.10.30.21.33/losses_wd = 0.0001.csv",
-        "results/2022.10.30.21.34/losses_wd = 0.001.csv",
-        "results/2022.10.30.21.36/losses_wd = 0.01.csv",
-        "results/2022.10.30.21.37/losses_wd = 0.1.csv",
-        "results/2022.10.30.21.39/losses_lr = 1e-05.csv",
-        "results/2022.10.30.21.40/losses_lr = 0.0001.csv",
-        "results/2022.10.30.21.42/losses_lr = 0.001.csv",
-        "results/2022.10.30.21.43/losses_lr = 0.01.csv",
-    ]
-    return files_20epochs, files
-
 
 ## Explore different hyperparameters and compare
 def heuristic_embedding_size(cardinality):
@@ -715,6 +686,18 @@ def explore_hyperparameters():
 def alternative_hyperparam_exploration(
     wds, embszs, lrs, dataset_path=None, baseline: bool = True
 ):
+    """Checks each combination of choices and prints out the one with best validation loss
+
+    Args:
+        wds (Iterable): List of weight decay
+        embszs (Iterable): List of embedding sizes
+        lrs (Iterable): List of learning rates
+        dataset_path (str|None, optional): Path to dataset instance, if None will generate a new each time. Defaults to None.
+        baseline (bool, optional): Flag if model to test is the baseline or extended. Defaults to True.
+
+    Returns:
+        dict: dictionary of parameter choices corresponding to best model
+    """
     best_model = {}
     best_loss = np.inf
     for emb_size in embszs:
@@ -747,6 +730,7 @@ def alternative_hyperparam_exploration(
 
 
 def split_test_set_file():
+    """Method to make a 70-30 split in dataset, not in use"""
     full_set = pd.read_csv("dataset/transactions_train.csv", dtype={"article_id": str})
     num_train = int(len(full_set) * 0.7)
     num_test = len(full_set) - num_train
@@ -758,6 +742,14 @@ def split_test_set_file():
 def load_kaggle_assets(
     to_download: Union[Iterable[str], None] = None
 ) -> Iterable[pd.DataFrame]:
+    """Downloads data from Kaggle competition, loads to Dataframes and deletes original files. Made due to low disk quota on server
+
+    Args:
+        to_download (list[str] | None, optional): List of files to download, if None will download all csv files. Defaults to None.
+
+    Returns:
+        list[pd.DataFrame]: Dataframes from downloaded files
+    """
     logging.debug("Loading assets from Kaggle to Markov ...")
     from zipfile import ZipFile
     from kaggle.api.kaggle_api_extended import KaggleApi
@@ -791,12 +783,44 @@ def load_kaggle_assets(
     return pd_objects
 
 
-def load_from_gdrive(gd_id: str) -> Any:
+def load_from_gdrive(gd_id: str, baseline: bool = True) -> Any:
     """Assumes you want to download a trained model from google drive (big!)"""
     import gdown
 
     gdown.download(id=gd_id, output="tmp_model.pth")
+    assert os.path.isfile("tmp_model.pth"), "Unable to fine downloaded file!"
 
+    if baseline:
+        pass
+    else:
+        pass
+
+def load_model(baseline: bool, data: Data_HM, emb_sz: int = 500):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    n_cust, n_art, *_ = data.df_id.nunique()
+    if baseline:
+        model = HM_model(n_cust, n_art, embedding_size=emb_sz).to(device)
+    else:
+        if {"age", "garment_group_no", "index_group_no"} <= set(data.df_id.columns):
+            logging.debug("Dataset object is already extended, no need to download anew")
+        else:
+            logging.debug("Transforming df_id to work for extended model")
+            data.df_id = _extend_row_data(
+                data, ["age"], ["garment_group_no", "index_group_no"]
+            )
+        # age/idxgroup/ggroup have to be the max instead of nunique
+        n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
+
+        model = HM_neural(
+            num_customer=n_cust,
+            num_articles=n_art,
+            num_age=n_age,
+            num_idxgroup=n_idxgroup,
+            num_garmentgroup=n_garmentgroup,
+            embedding_size=emb_sz,
+            bias_nodes=True,
+        ).to(device)
+    return model
 
 # <<<<< UTILITIES
 
@@ -822,10 +846,7 @@ def inference_alternative(model_path, test_data, k: int = 12, baseline: bool = F
     all_preds = defaultdict(dict)
     # Best preds now just finds the label-encoded stuff since we already have LF on those
     device = "cpu"
-    if baseline:
-        model = HM_model(num_customer, num_articles, embedding_size=500).to(device) # TODO must be changed to work for extended as well
-    else:
-        model = HM_neural(num_customer, num_articles, num_age,num_idxgroup,num_garmentgroup,embedding_size=500,bias_nodes=True)
+    model = load_model(baseline, test_data, emb_sz= 500)
     model.load_state_dict(torch.load(model_path, map_location=torch.device(device)))
     model.eval()
 
@@ -990,32 +1011,7 @@ def load_dataset_and_train(
         data = read_dataset_obj(persisted_dataset_path)
         logging.debug("Read dataset successfully")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if baseline:
-        n_cust, n_art, _ = data.df_id.nunique()
-        model = HM_model(
-            num_customer=n_cust,
-            num_articles=n_art,
-            embedding_size=hyperparams.embedding_size,
-        ).to(device)
-    else:
-        logging.debug("Transforming df_id to work for extended model")
-        data.df_id = _extend_row_data(
-            data, ["age"], ["garment_group_no", "index_group_no"]
-        )
-        n_cust, n_art, *_ = data.df_id.nunique()
-        # age/idxgroup/ggroup have to be the max instead of nunique
-        n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
-
-        model = HM_neural(
-            num_customer=n_cust,
-            num_articles=n_art,
-            num_age=n_age,
-            num_idxgroup=n_idxgroup,
-            num_garmentgroup=n_garmentgroup,
-            embedding_size=hyperparams.embedding_size,
-            bias_nodes=True,
-        ).to(device)
+    model = load_model(baseline, data, hyperparams.embedding_size)
     logging.debug("Created model sucessfully")
     last_valid_loss = train(model, data, hyperparams, baseline, plot_loss=True)
     if save_model:
@@ -1026,34 +1022,40 @@ def load_dataset_and_train(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        filename="markov_run.log",
-        # encoding="utf-8", # Not present in Python 3.8...
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    logging.debug("Starting param exploration for extended model")
-    try:
-        alternative_hyperparam_exploration(
-            wds=(1e-4, 1e-3, 1e-1),
-            embszs=(500, 100, 1000),
-            lrs=(1e-2, 1e-3, 1e-4),
-            dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
-            baseline=False,
-        )
-    except Exception as e:
-        logging.exception(f"Traceback in main! {e}")
-        raise e
+    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
+    valid_data = data.get_data_from_subset(data.val)
+    valid_data = valid_data[valid_data["label"] == 1]
+    articles_per_customer = valid_data.groupby("customer_id")["article_id"].count()
+    print(articles_per_customer)
+    print(articles_per_customer.mean())
+    # logging.basicConfig(
+    #     filename="markov_run.log",
+    #     # encoding="utf-8", # Not present in Python 3.8...
+    #     level=logging.DEBUG,
+    #     format="%(asctime)s %(levelname)s %(message)s",
+    # )
+    # logging.debug("Starting param exploration for extended model")
+    # try:
+    #     alternative_hyperparam_exploration(
+    #         wds=(1e-4, 1e-3, 1e-1),
+    #         embszs=(500, 100, 1000),
+    #         lrs=(1e-2, 1e-3, 1e-4),
+    #         dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+    #         baseline=False,
+    #     )
+    # except Exception as e:
+    #     logging.exception(f"Traceback in main! {e}")
+    #     raise e
 
-    logging.debug("Starting hyperparameter exploration of baseline")
-    try:
-        alternative_hyperparam_exploration(
-            wds=(1e-4, 1e-3, 1e-1),
-            embszs=(500, 100, 1000),
-            lrs=(1e-2, 1e-3, 1e-4),
-            dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
-            baseline=True,
-        )
-    except Exception as e:
-        logging.exception(f"Traceback in main! {e}")
-        raise e
+    # logging.debug("Starting hyperparameter exploration of baseline")
+    # try:
+    #     alternative_hyperparam_exploration(
+    #         wds=(1e-4, 1e-3, 1e-1),
+    #         embszs=(500, 100, 1000),
+    #         lrs=(1e-2, 1e-3, 1e-4),
+    #         dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+    #         baseline=True,
+    #     )
+    # except Exception as e:
+    #     logging.exception(f"Traceback in main! {e}")
+    #     raise e
