@@ -1,5 +1,5 @@
 # >>>>> IMPORTS
-import os, torch, importlib, functools, logging
+import os, torch, importlib, functools, logging, pickle
 import numpy as np, pandas as pd
 from torch.utils.data import DataLoader, Dataset
 from typing import Tuple, Any, Iterable, Union
@@ -19,6 +19,7 @@ matplotlib.use("Agg")  # Backend for SSH runs
 import matplotlib.pyplot as plt
 
 # <<<<< IMPORTS
+
 
 # >>>>> PREPROCESSING
 def load_min_data(filename: Union[str, Iterable]):
@@ -50,7 +51,6 @@ def clean_article_data(df):
 
 
 # <<<<< PREPROCESSING
-
 
 # >>>>> DATA LOADING
 
@@ -199,14 +199,107 @@ class Data_HM(Dataset):
         return DataLoader(dataset=subset, batch_size=self.batch_size)
 
 
+class Data_HM_Complete(Data_HM):
+    def __init__(
+        self,
+        total_cases: int,
+        portion_negatives: float,
+        df_transactions: pd.DataFrame,
+        batch_size: int,
+        train_portion: Union[float, None] = None,
+        test_portion: Union[float, None] = None,
+        transform: Any = None,
+        target_transform: Any = None,
+        random_seed: int = None,
+    ) -> None:
+        self.random_seed = random_seed
+        super().__init__(
+            total_cases,
+            portion_negatives,
+            df_transactions,
+            batch_size,
+            train_portion,
+            test_portion,
+            transform,
+            target_transform,
+        )
+
+    def generate_dataset(
+        self, total_cases: int, portion_negatives: float, df_transactions: pd.DataFrame
+    ) -> Tuple[pd.DataFrame, LabelEncoder, LabelEncoder]:
+        logging.debug("Entered child `generate_dataset` method (expected)")
+        # NB: Overrides parent method but returns the same info ...
+        if self.random_seed is not None:
+            np.random.seed(self.random_seed)
+            logging.debug(f"Seed set to {self.random_seed}")
+        df_transactions = df_transactions[
+            ["customer_id", "article_id"]
+        ]  # This object has the same behavior as df_positive
+        customers = df_transactions["customer_id"].unique()
+        articles = df_transactions["article_id"].unique()
+        n_positive = round(total_cases * (1 - portion_negatives))
+        n_negative = total_cases - n_positive  # mu inferred implicitly from here
+        logging.debug(f"Generating {n_negative} random negative samples")
+        samples = pd.DataFrame(
+            {
+                "customer_id": np.random.choice(
+                    customers, size=n_negative, replace=True
+                ),
+                "article_id": np.random.choice(articles, size=n_negative, replace=True),
+            }
+        )
+        logging.debug("Merging samples in order to remove false negatives")
+        samples = pd.merge(
+            samples,
+            df_transactions,
+            on=["customer_id", "article_id"],
+            how="outer",
+            indicator=True,
+        )
+        logging.debug("Indexing out false negatives")
+        samples = samples.loc[samples["_merge"] == "left_only"].drop("_merge", axis=1)
+
+        df_transactions["label"] = 1
+        samples["label"] = 0
+        logging.debug(
+            "Added labels. Now: concat of positive and negative plus a shuffle of all data"
+        )
+        samples = (
+            pd.concat((df_transactions, samples)).sample(frac=1).reset_index(drop=True)
+        )
+        le_cust = LabelEncoder()
+        le_art = LabelEncoder()
+        logging.debug("Fitting label encoders")
+        le_cust.fit(customers)
+        le_art.fit(articles)
+
+        # Doing as much as possible in-place here:
+        logging.debug("Transforming IDs to label-encoded IDs")
+        samples["customer_id"] = le_cust.transform(samples["customer_id"])
+        samples["article_id"] = le_art.transform(samples["article_id"])
+        samples["label"] = samples["label"].astype(
+            np.uint8
+        )  # Just to reproduce parent method...
+        logging.info("Done generating data!")
+        return (
+            samples,
+            le_cust,
+            le_art,
+        )
+
+
 # <<<<< DATA LOADING
+
 
 # >>>>> MODEL DEFINITINON AND TRAINING
 
 
 class HM_model(torch.nn.Module):
     """Baseline HM model"""
-    def __init__(self, num_customer, num_articles, embedding_size):
+
+    def __init__(
+        self, num_customer, num_articles, embedding_size, bias_nodes: bool = True
+    ):
         super(HM_model, self).__init__()
         self.customer_embed = torch.nn.Embedding(
             num_embeddings=num_customer, embedding_dim=embedding_size
@@ -214,8 +307,13 @@ class HM_model(torch.nn.Module):
         self.art_embed = torch.nn.Embedding(
             num_embeddings=num_articles, embedding_dim=embedding_size
         )
-        self.customer_bias = torch.nn.Embedding(num_customer, 1)
-        self.article_bias = torch.nn.Embedding(num_articles, 1)
+        if not bias_nodes:  # Default is that we DO have biases
+            # They're added lienarly so this should give no effect
+            self.customer_bias = lambda row: 0
+            self.article_bias = lambda row: 0
+        else:
+            self.customer_bias = torch.nn.Embedding(num_customer, 1)
+            self.article_bias = torch.nn.Embedding(num_articles, 1)
 
     def forward(self, customer_row, article_row):
         """The forward pass used in model training (matrix factorization)
@@ -238,48 +336,29 @@ class HM_model(torch.nn.Module):
         return torch.sigmoid(dot_prod)
 
 
-class HM_neural(torch.nn.Module): # TODO this can inherit from HM_model instead
-    """Extended model"""
+class HM_Extended(HM_model):
+    """Model class extending the information used in learning process"""
+
     def __init__(
         self,
-        num_customer: int,
-        num_articles: int,
-        num_age: int,
-        num_idxgroup: int,
-        num_garmentgroup: int,
-        embedding_size: int,
-        bias_nodes: bool,
-    ) -> None:
-        super().__init__()
-        self.customer_embed = torch.nn.Embedding(
-            num_embeddings=num_customer, embedding_dim=embedding_size
-        )
-        self.age_embed = torch.nn.Embedding(num_age, embedding_size) # New
-        self.article_embed = torch.nn.Embedding(
-            num_embeddings=num_articles, embedding_dim=embedding_size
-        )
-        self.indexgroup_embed = torch.nn.Embedding(num_idxgroup, embedding_size) # New
+        num_customer,
+        num_articles,
+        num_age,
+        num_idxgroup,
+        num_garmentgroup,
+        embedding_size,
+        bias_nodes: bool = True,
+    ):
+        super().__init__(num_customer, num_articles, embedding_size, bias_nodes)
+        self.age_embed = torch.nn.Embedding(num_age, embedding_size)
+        self.indexgroup_embed = torch.nn.Embedding(num_idxgroup, embedding_size)
         self.garmentgroup_embed = torch.nn.Embedding(num_garmentgroup, embedding_size)
-        if bias_nodes:
-            self.customer_bias = torch.nn.Embedding(num_customer, 1)
-            self.article_bias = torch.nn.Embedding(num_articles, 1)
-        else:
-            # They're added lienarly so this should give no effect
-            self.customer_bias = lambda row: 0
-            self.article_bias = lambda row: 0
-        # Linear layers from side-info to user/item matrix
+
         self.article_MLP = torch.nn.Linear(embedding_size * 3, embedding_size)
         self.customer_MLP = torch.nn.Linear(embedding_size * 2, embedding_size)
 
-        # self.layers = torch.nn.Sequential(
-        #     # 3 features: age (customer), index_group and garment_group (article)
-        #     # n_activations deaults to e.g. 100?
-        #     torch.nn.Linear(int((batch_size := 64) * 3), int(n_activations)),
-        #     torch.nn.ReLU(),
-        #     torch.nn.Linear(int(n_activations), 1),
-        # ) # TODO delete this if not relevant
-
     def article_transform(self, article, garment_group, index_group):
+        """Concatenates each article embedding through its linear layer, activation is sigmoid"""
         embeds = (
             self.article_embed(article),
             self.indexgroup_embed(index_group),
@@ -289,17 +368,22 @@ class HM_neural(torch.nn.Module): # TODO this can inherit from HM_model instead
         return torch.sigmoid(final_embedding)
 
     def customer_transform(self, customer, age):
+        """Concatenates each customer embedding through its linear layer, activation is sigmoid"""
         embeds = (self.customer_embed(customer), self.age_embed(age))
         final_embedding = self.customer_MLP(torch.cat(embeds, 1))
         return torch.sigmoid(final_embedding)
 
     def forward(self, row):
+        """Forward pass for extended model, overrides parent method"""
         customer, article, age, garment_group, index_group = [
             row[:, i] for i in range(5)
         ]
-        # Manipulate IDs to be zero-indexed # TODO improve this so it's not on each forward pass (not a priority)
-        garment_group = garment_group - 1001  # 1009 -> 8
-        index_group = index_group - 1  # also to zero-index
+        # Manipulate IDs to be zero-indexed, thus we don't need label encoders.
+        age[age < 0] = 36  # Cast NaNs to average of all customers, 36
+        garment_group = garment_group - 1001
+        index_group = index_group - 1
+        age = age - 1
+
         customer_matrix = self.customer_transform(customer, age)
         article_matrix = self.article_transform(article, garment_group, index_group)
         biases = self.customer_bias(customer), self.article_bias(article)
@@ -308,8 +392,9 @@ class HM_neural(torch.nn.Module): # TODO this can inherit from HM_model instead
         return torch.sigmoid(x)
 
 
+# Class method to HM_Extended
 def _extend_row_data(
-    self: Data_HM, customer_rows: Iterable[str], article_rows: Iterable[str]
+    self: HM_Extended, customer_rows: Iterable[str], article_rows: Iterable[str]
 ) -> pd.DataFrame:
     """Adds the given customer/article rows to dataset-object (not in-place)
 
@@ -355,6 +440,24 @@ def _extend_row_data(
     return df_ext[ordered_columns]
 
 
+@dataclass
+class Hyperparameters:
+    lr_rate: float = 1e-3
+    weight_decay: str = 1e-4
+    epochs: int = 20
+    validation_frequency: int = 1
+    optimizer: Any = torch.optim.Adam
+    embedding_size: int = 500
+    save_loss: Union[bool, str] = True
+    verbose: bool = False
+    # These have no use if dataset is loaded from file
+    dataset_cases: int = 2000
+    dataset_portion_negatives: float = 0.9
+    dataset_train_portion: float = 0.7
+    dataset_batch_size: int = 5
+    dataset_full: bool = False
+
+
 def train_one_epoch(
     model: HM_model,
     data: Data_HM,
@@ -364,6 +467,20 @@ def train_one_epoch(
     verbose: bool = False,
     baseline: bool = True,
 ):
+    """Trains a single epoch of Data_HM (or child) model
+
+    Args:
+        model (HM_model): HM_model class or child to HM_model.
+        data (Data_HM): Dataset class, either Data_HM or a child class
+        epoch_num (int): Which epoch this run is
+        optimizer (_type_): Optimizer type from main call, usually Adam
+        loss (_type_): Loss function, usually BCE
+        verbose (bool, optional): Verbose flag, deprecated. Defaults to False.
+        baseline (bool, optional): Baseline flag (training a little different for extended moel). Defaults to True.
+
+    Returns:
+        float: Total loss for current epoch
+    """
     epoch_loss = 0
     device = "cuda" if torch.cuda.is_available() else "cpu"
     for item in data.get_DataLoader(trainDL=True):
@@ -386,20 +503,36 @@ def train_one_epoch(
 
 
 def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
+    """Main training function for models
+
+    Args:
+        model (HM_model | HM_Extended): Model class to train
+        data (Data_HM | Data_HM_Complete): Dataset class to use
+        params (Hyperparameters): Hyperparameter container (and also some other settings)
+        baseline (bool, optional): Baseline flag. Defaults to True.
+        plot_loss (bool, optional): Flag to produce loss plots to disk or not. Defaults to False.
+
+    Returns:
+        float: Validation loss for the last (computed) epoch
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # Uses binary cross entropy at the moment
+    # Uses binary cross entropy at the moment.
     loss_metric = torch.nn.BCELoss().to(device)
     optimizer = params.optimizer(
         model.parameters(), lr=params.lr_rate, weight_decay=params.weight_decay
     )
+
     # Adjust lr once model stops improving using scheduler
     lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+
     save_loss = params.save_loss
     if save_loss:
         train_losses = []
         valid_losses = []
-        # Settings not in use atm but we can get the hyperparams from it:))
+        # `settings` just contains all hyperparameter info, to be able to distinguishs which
+        # models produce the loss plots when running multiple at the same time
         settings = ",".join([str(v) for v in params.__dict__.values()])
+
     for epoch in tqdm(range(params.epochs)):
         model.train()
         epoch_loss = train_one_epoch(
@@ -462,13 +595,78 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
                 save=f"{'b' if baseline else 'e'}_{settings}.pdf",
                 baseline=baseline,
             )
-            # os.remove(filename) # Fallback in case plotting doesnt work again
-            # logging.debug("Removed csv file and stored plot")
+            # # If you want to remove the csv files of the losses, you can call `os.remove(filename)` here
+            # os.remove(filename)
     return valid_loss / len(data.get_DataLoader(trainDL=False))
 
 
-# <<<<< MODEL DEFINITION AND TRAINING
+def load_dataset_and_train(
+    use_min_dataset: bool = False,
+    persisted_dataset_path: Union[str, None] = None,
+    save_model: Union[str, bool] = False,
+    hyperparams=Hyperparameters(),
+    transactions_path: str = "dataset/transactions_train.csv",
+    baseline: bool = True,
+):
+    """This model loads the data files, database object and runs the train method. Will also save trained model"""
 
+    # Load data
+    if use_min_dataset:
+        df_c, df_a, df_t = load_min_data(
+            [
+                f"dataset_sample/{n}_min.csv"
+                for n in ("customer", "articles", "transactions")
+            ]
+        )
+    elif hyperparams.dataset_full:
+        logging.debug("Creating full dataset object")
+        df_t = pd.read_pickle(transactions_path)
+        dataset_params = {
+            "total_cases": hyperparams.dataset_cases,
+            "portion_negatives": hyperparams.dataset_portion_negatives,
+            "df_transactions": df_t,
+            "train_portion": hyperparams.dataset_train_portion,
+            "batch_size": hyperparams.dataset_batch_size,
+        }
+        data = Data_HM_Complete(**dataset_params)
+        logging.debug("Full dataset object done!")
+    elif persisted_dataset_path is None:
+        df_c = pd.read_csv("dataset/customers.csv")
+        # Articles IDs all start with 0 which disappears if cast to a number
+        df_a = pd.read_csv("dataset/articles.csv", dtype={"article_id": str})
+        df_t = pd.read_csv(transactions_path, dtype={"article_id": str})
+        df_c = clean_customer_data(df_c)
+        df_a = clean_article_data(df_a)
+
+        dataset_params = {
+            "total_cases": hyperparams.dataset_cases,
+            "portion_negatives": hyperparams.dataset_portion_negatives,
+            "df_transactions": df_t,
+            "train_portion": hyperparams.dataset_train_portion,
+            "batch_size": hyperparams.dataset_batch_size,
+        }
+        data = Data_HM(**dataset_params)
+        save_dataset_obj(
+            data,
+            f"object_storage/dataset-{datetime.today().strftime('%Y.%m.%d.%H.%M')}.pckl",
+        )
+    else:
+        data = read_dataset_obj(persisted_dataset_path)
+        logging.debug("Read dataset successfully")
+
+    model = load_model(baseline, data, hyperparams.embedding_size)
+    logging.debug("Created model sucessfully")
+    last_valid_loss = train(model, data, hyperparams, baseline, plot_loss=True)
+    if save_model:
+        if isinstance(save_model, bool):
+            save_model = datetime.today().strftime("%Y.%m.%d.%H.%M") + ".pth"
+        if not os.path.isdir("models"):
+            os.mkdir("models")
+        torch.save(model.state_dict(), os.path.join("models", save_model))
+    return last_valid_loss
+
+
+# <<<<< MODEL DEFINITION AND TRAINING
 
 # >>>>> UTILITIES
 
@@ -597,11 +795,114 @@ def save_dataset_obj(data: HM_model, dst: str) -> None:
 
 
 def read_dataset_obj(src: str) -> Any:
-    import pickle
 
     with open(src, "rb") as f:
         data = pickle.load(f)
     return data
+
+
+def load_kaggle_assets(
+    to_download: Union[Iterable[str], None] = None
+) -> Iterable[pd.DataFrame]:
+    """Downloads data from Kaggle competition, loads to Dataframes and deletes original files. Made due to low disk quota on server
+
+    Args:
+        to_download (list[str] | None, optional): List of files to download, if None will download all csv files. Defaults to None.
+
+    Returns:
+        list[pd.DataFrame]: Dataframes from downloaded files
+    """
+    logging.debug("Loading assets from Kaggle to Markov ...")
+    from zipfile import ZipFile
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    api = KaggleApi()
+    api.authenticate()
+    if to_download is None:
+        to_download = ["customers.csv", "transactions_train.csv", "articles.csv"]
+    pd_objects = []
+
+    for i, file in enumerate(to_download):
+        logging.debug(f"Downlodaing file {file}")
+        api.competition_download_file(
+            competition="h-and-m-personalized-fashion-recommendations", file_name=file
+        )
+
+        zf = ZipFile(f"{file}.zip")
+        zf.extractall()
+        zf.close()
+
+        # Customers-file does not require dtype specification, the others do
+        if i == 0:
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_csv(file, dtype={"article_id": str})
+        pd_objects.append(df)
+        # Remove files created from download now that it's loaded to memory
+        os.remove(file)
+        os.remove(f"{file}.zip")
+        logging.debug(f"Sucessfully loaded and removed {file}")
+    return pd_objects
+
+
+def load_from_gdrive(gd_id: str, outpath: str = "tmp_model.pth") -> None:
+    """Assumes you want to download a trained model from google drive (big!)"""
+    import gdown
+
+    gdown.download(id=gd_id, output=outpath)
+    assert os.path.isfile(outpath), "Unable to fine downloaded file!"
+    logging.debug(
+        "Sucessfully downloaded pth file. Make sure to remove after loading to memory"
+    )
+    return outpath
+
+
+def load_model(
+    baseline: bool, data: Data_HM, emb_sz: int = 500, bias: bool = True
+) -> object:
+    """Based on baseline flag, retrieves model and ensures column types are correct.
+
+    Args:
+        baseline (bool): Baseline flag
+        data (Data_HM): Original Dataset object (NB self.df_id can be modified when passed).
+        emb_sz (int, optional): Embedding size, must match size in `data`. Defaults to 500.
+        bias (bool, optional): Bias flags (include bias nodes or not). Defaults to True.
+
+    Returns:
+        object: HM_model or HM_Extended
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    n_cust, n_art, *_ = data.df_id.nunique()
+    if baseline:
+        model = HM_model(n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias).to(
+            device
+        )
+    else:
+        additional_columns = {"age", "garment_group_no", "index_group_no"}
+        if additional_columns == additional_columns.intersection(
+            set(data.df_id.columns)
+        ):
+            logging.debug(
+                "Dataset object is already extended, no need to download anew"
+            )
+        else:
+            logging.debug("Transforming df_id to work for extended model")
+            data.df_id = _extend_row_data(
+                data, ["age"], ["garment_group_no", "index_group_no"]
+            )
+        # age/idxgroup/ggroup have to be the max instead of nunique
+        n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
+
+        model = HM_Extended(
+            num_customer=n_cust,
+            num_articles=n_art,
+            num_age=n_age,
+            num_idxgroup=n_idxgroup,
+            num_garmentgroup=n_garmentgroup,
+            embedding_size=emb_sz,
+            bias_nodes=bias,
+        ).to(device)
+    return model
 
 
 def plot_loss_results(
@@ -611,6 +912,15 @@ def plot_loss_results(
     save: Union[str, None] = None,
     baseline: bool = True,
 ):
+    """Generate plot of training and/or validation loss across trained epochs
+
+    Args:
+        lossfile (str): Path to csv file containing training and validation losses
+        which (str, optional): Which plot to make (training, validation, all). Defaults to "all".
+        plot_title (bool, optional): Title flag. Won't use any titles if False. Defaults to True.
+        save (Union[str, None], optional): Destination path for plot. Won't save to disk of None. Defaults to None.
+        baseline (bool, optional): Baseline flag (assumes model=='extended' if False). Defaults to True.
+    """
     res = pd.read_csv(lossfile, header=None)
     plt.figure()
     if which != "validation":
@@ -626,23 +936,30 @@ def plot_loss_results(
         plt.title(title)
     if save is not None:
         plt.savefig(save)
-    # plt.show()
+    else:
+        plt.show()
 
 
 def compare_hyperparameter_results(data: Iterable[str]):
+    """Helper to plot the training loss for each run specified in `data`"""
     plt_calls = {}
     for results_fn in data:
         plt.xlabel("Epoch number")
         plt.ylabel("Loss value")
         res = pd.read_csv(results_fn, header=None)
-        setting = results_fn[results_fn.find("_") + 1 :]
+        setting = results_fn[
+            results_fn.find("_") + 1 :
+        ]  # Retrieves filename more or less
         variable = setting.split("=")[0]
+        # Here we just iterate through Hyperparam. choices and stores the function call for later use
         if variable in plt_calls:
             plt_calls[variable].append(
-                functools.partial(plt.plot, res[1], label=setting)
+                functools.partial(plt.plot, res[0], label=setting)
             )
         else:
             plt_calls[variable] = [functools.partial(plt.plot, res[0], label=setting)]
+
+    # Iterate through previously established function calls and plots
     for var, cmd_list in plt_calls.items():
         for cmd in cmd_list:
             cmd()  # plt.plot(...) for specific variable
@@ -653,14 +970,8 @@ def compare_hyperparameter_results(data: Iterable[str]):
         plt.show()
 
 
-
-## Explore different hyperparameters and compare
-def heuristic_embedding_size(cardinality):
-    # https://github.com/fastai/fastai/blob/master/fastai/tabular/model.py#L12
-    return min(600, round(1.6 * cardinality**0.56))
-
-
 def explore_hyperparameters():
+    """Runs model for different choices of weight decay, embedding size and learn rate"""
     weight_decays = (1e-4, 1e-3, 1e-2, 1e-1)
     embedding_size = (10, 100, 500, 1000, int(1e4))
     lr_rates = (1e-5, 1e-4, 1e-3, 1e-2)
@@ -669,23 +980,41 @@ def explore_hyperparameters():
         testing_param = f"{emb_size = }"
         print(testing_param)
         hparams = Hyperparameters(embedding_size=emb_size, save_loss=testing_param)
-        load_dataset_and_train(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+        load_dataset_and_train(
+            persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams
+        )
     print("Testing WEIGHT DECAYS")
     for wd in weight_decays:
         testing_param = f"{wd = }"
         print(testing_param)
         hparams = Hyperparameters(weight_decay=wd, save_loss=testing_param)
-        load_dataset_and_train(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+        load_dataset_and_train(
+            persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams
+        )
     for lr in lr_rates:
         testing_param = f"{lr = }"
         print(testing_param)
         hparams = Hyperparameters(lr_rate=lr, save_loss=testing_param)
-        load_dataset_and_train(persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams)
+        load_dataset_and_train(
+            persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams
+        )
+
+
+# Functions below are currently not in use, but can be practical
+
+
+def heuristic_embedding_size(cardinality):
+    # https://github.com/fastai/fastai/blob/master/fastai/tabular/model.py#L12
+    return min(600, round(1.6 * cardinality**0.56))
 
 
 def alternative_hyperparam_exploration(
-    wds, embszs, lrs, dataset_path=None, baseline: bool = True
-):
+    wds: Iterable,
+    embszs: Iterable,
+    lrs: Iterable,
+    dataset_path=None,
+    baseline: bool = True,
+) -> dict:
     """Checks each combination of choices and prints out the one with best validation loss
 
     Args:
@@ -739,96 +1068,21 @@ def split_test_set_file():
     full_set.drop(test_idx).to_csv("dataset/tr_train.csv")
 
 
-def load_kaggle_assets(
-    to_download: Union[Iterable[str], None] = None
-) -> Iterable[pd.DataFrame]:
-    """Downloads data from Kaggle competition, loads to Dataframes and deletes original files. Made due to low disk quota on server
-
-    Args:
-        to_download (list[str] | None, optional): List of files to download, if None will download all csv files. Defaults to None.
-
-    Returns:
-        list[pd.DataFrame]: Dataframes from downloaded files
-    """
-    logging.debug("Loading assets from Kaggle to Markov ...")
-    from zipfile import ZipFile
-    from kaggle.api.kaggle_api_extended import KaggleApi
-
-    api = KaggleApi()
-    api.authenticate()
-    if to_download is None:
-        to_download = ["customers.csv", "transactions_train.csv", "articles.csv"]
-    pd_objects = []
-
-    for i, file in enumerate(to_download):
-        logging.debug(f"Downlodaing file {file}")
-        api.competition_download_file(
-            competition="h-and-m-personalized-fashion-recommendations", file_name=file
-        )
-
-        zf = ZipFile(f"{file}.zip")
-        zf.extractall()
-        zf.close()
-
-        # Customers-file does not require dtype specification, the others do
-        if i == 0:
-            df = pd.read_csv(file)
-        else:
-            df = pd.read_csv(file, dtype={"article_id": str})
-        pd_objects.append(df)
-        # Remove files created from download now that it's loaded to memory
-        os.remove(file)
-        os.remove(f"{file}.zip")
-        logging.debug(f"Sucessfully loaded and removed {file}")
-    return pd_objects
-
-
-def load_from_gdrive(gd_id: str, baseline: bool = True) -> Any:
-    """Assumes you want to download a trained model from google drive (big!)"""
-    import gdown
-
-    gdown.download(id=gd_id, output="tmp_model.pth")
-    assert os.path.isfile("tmp_model.pth"), "Unable to fine downloaded file!"
-
-    if baseline:
-        pass
-    else:
-        pass
-
-def load_model(baseline: bool, data: Data_HM, emb_sz: int = 500):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    n_cust, n_art, *_ = data.df_id.nunique()
-    if baseline:
-        model = HM_model(n_cust, n_art, embedding_size=emb_sz).to(device)
-    else:
-        if {"age", "garment_group_no", "index_group_no"} <= set(data.df_id.columns):
-            logging.debug("Dataset object is already extended, no need to download anew")
-        else:
-            logging.debug("Transforming df_id to work for extended model")
-            data.df_id = _extend_row_data(
-                data, ["age"], ["garment_group_no", "index_group_no"]
-            )
-        # age/idxgroup/ggroup have to be the max instead of nunique
-        n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
-
-        model = HM_neural(
-            num_customer=n_cust,
-            num_articles=n_art,
-            num_age=n_age,
-            num_idxgroup=n_idxgroup,
-            num_garmentgroup=n_garmentgroup,
-            embedding_size=emb_sz,
-            bias_nodes=True,
-        ).to(device)
-    return model
-
 # <<<<< UTILITIES
 
-# >>>>> INFERENCE AND MAIN
+
+# >>>>> INFERENCE
 
 
 @torch.inference_mode()
-def inference_alternative(model_path, test_data, k: int = 12, baseline: bool = False, n_customer_threshold: int = 100) -> Tuple[dict, object]:
+def topk_for_all_customers(
+    model_path,
+    test_data,
+    k: int = 12,
+    baseline: bool = False,
+    n_customer_threshold: int = 100,
+    remove_pth_file_after_load: bool = False,
+) -> dict:
     """Make dictionary on form {customer: [art_1, ..., art_k]} for k highest predicted articles,
     for each customer and article in the *validation set*"""
 
@@ -843,23 +1097,28 @@ def inference_alternative(model_path, test_data, k: int = 12, baseline: bool = F
 
     # Initialize model and dataset
     num_customer, num_articles = test_data.df_id.nunique().values[:2]
-    all_preds = defaultdict(dict)
+    all_preds = defaultdict(
+        dict
+    )  # Essentially a 2D-dict: https://docs.python.org/3/library/collections.html#collections.defaultdict
     # Best preds now just finds the label-encoded stuff since we already have LF on those
-    device = "cpu"
-    model = load_model(baseline, test_data, emb_sz= 500)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = load_model(baseline, test_data, emb_sz=500)
     model.load_state_dict(torch.load(model_path, map_location=torch.device(device)))
+    if remove_pth_file_after_load:
+        logging.info(f"Removing pth-file {model_path}")
+        os.remove(model_path)
     model.eval()
 
-    # Compute predictions
+    # Access validation data
     data = test_data.get_data_from_subset(test_data.val).to_numpy()
-    valid_customers, valid_articles = np.unique(data[:, 0]), np.unique(
-        data[:, 1]
-    )  # TODO valid cust should np.unique(data[:, 0])
+    valid_customers, valid_articles = np.unique(data[:, 0]), np.unique(data[:, 1])
     valid_customers, valid_articles = torch.IntTensor(valid_customers).to(
         device
     ), torch.IntTensor(valid_articles).to(device)
     from math import ceil
 
+    # Create batches of articles similar to the model batch size
     valid_articles = np.array_split(
         valid_articles, ceil(valid_articles.shape[0] / test_data.batch_size)
     )
@@ -869,11 +1128,13 @@ def inference_alternative(model_path, test_data, k: int = 12, baseline: bool = F
     for customer in tqdm(valid_customers):
         customer_count += 1
         for article in valid_articles:
+            # For customer 3, we pass model([3, 3, ..., 3], [a1, a2, ..., an])
             customer_exp = customer.expand(article.shape[0])
             pred = model(customer_exp, article).view(-1)
             for i, pred_i in enumerate(pred):
                 all_preds[customer.item()][article[i]] = pred_i
         if customer_count % n_customer_threshold == 0:
+            # Clears all predictions again to save memory
             logging.debug("Sending batch to out dict...")
             _update_out_dict(all_preds)
             # Free memory and re-initiate defaultdict
@@ -890,8 +1151,19 @@ def compute_map(
     best_preds: dict,
     test_data: Data_HM,
     k: int = 12,
-    use_all_data_as_ground_truth: bool = False
-):
+    use_all_data_as_ground_truth: bool = False,
+) -> pd.DataFrame:
+    """Compute average precision @k for predicted entries `out_dict` from previous function
+
+    Args:
+        best_preds (dict): Output dictionary from topk_from_all_customers function
+        test_data (Data_HM): Dataset object
+        k (int, optional): Cutoff. Defaults to 12.
+        use_all_data_as_ground_truth (bool, optional): Bool flag, if False will only consider validation set. Defaults to False.
+
+    Returns:
+        pd.DataFrame: Average precision for all customers such that its .mean() is the MAP@k value
+    """
     if use_all_data_as_ground_truth:
         logging.debug("Returning best predicted values back to true IDs ...")
         decoded_preds = dict()
@@ -922,20 +1194,25 @@ def compute_map(
             .agg({"article_id": list})
             .reset_index()
         )
-
+    # Load model predictions to dataframe
     preds = pd.DataFrame.from_dict(best_preds, orient="index").reset_index()
     preds.columns = ["customer_id", "est_article_id"]
-    logging.debug(f"Value counts before removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}")
-    
+    logging.debug(
+        f"Value counts before removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}"
+    )
+
     # Remove duplicates
     ground_truth["article_id"] = ground_truth["article_id"].apply(
         lambda c: list(set(c))
     )
-    logging.debug(f"Value counts after removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}")
+    logging.debug(
+        f"Value counts after removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}"
+    )
 
     merged = ground_truth.merge(preds)
     from utils.metrics import prec, rel
 
+    # Compute average precision here
     average_precision = merged.apply(
         lambda x: sum(
             [
@@ -947,115 +1224,184 @@ def compute_map(
         / min(k, len(x.est_article_id)),
         axis=1,
     )
-    map_score = average_precision.mean()
-    return average_precision  # map_score
+    # Returns average precision for each customer instead of taking the mean (== MAP@k)
+    return average_precision
 
 
-@dataclass
-class Hyperparameters:
-    lr_rate: float = 1e-3
-    weight_decay: str = 1e-4
-    epochs: int = 20
-    validation_frequency: int = 1
-    optimizer: Any = torch.optim.Adam
-    embedding_size: int = 500
-    save_loss: Union[bool, str] = True
-    verbose: bool = False
-    # These have no use if dataset is loaded from file
-    dataset_cases: int = 2000  
-    dataset_portion_negatives: float = 0.9
-    dataset_train_portion: float = 0.7
-    datset_batch_size: int = 5
-    # Add more here...
+def try_except_action(action):
+    """Customer that encapsulates (void) function in try-except block"""
+
+    def wrapper():
+        action_name = action.__name__
+        try:
+            action()
+        except Exception as e:
+            logging.exception(f"Exception in {action_name}!\n{e}")
+        else:
+            logging.deug(f"Successfully done with action {action_name}. Exiting ...")
+        finally:
+            return None
+
+    return wrapper
 
 
-def load_dataset_and_train(
-    use_min_dataset: bool = False,
-    persisted_dataset_path: Union[str, None] = None,
-    save_model: Union[str, bool] = False,
-    hyperparams=Hyperparameters(),
-    transactions_path: str = "dataset/transactions_train.csv",
-    baseline: bool = True,
-):
-    """This basically just loads the data files, database object and runs train. Will also save trained model"""
+@try_except_action
+def action_hyperparams():
+    logging.debug("Starting param exploration for extended model")
 
-    # Load data
-    if use_min_dataset:
-        df_c, df_a, df_t = load_min_data(
-            [
-                f"dataset_sample/{n}_min.csv"
-                for n in ("customer", "articles", "transactions")
-            ]
+    alternative_hyperparam_exploration(
+        wds=(1e-4, 1e-3, 1e-1),
+        embszs=(500, 100, 1000),
+        lrs=(1e-2, 1e-3, 1e-4),
+        dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+        baseline=False,
+    )
+    logging.debug("Starting hyperparameter exploration of baseline")
+    alternative_hyperparam_exploration(
+        wds=(1e-4, 1e-3, 1e-1),
+        embszs=(500, 100, 1000),
+        lrs=(1e-2, 1e-3, 1e-4),
+        dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+        baseline=True,
+    )
+
+
+@try_except_action
+def action_map():
+    logging.debug("Computing MAP for model")
+    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
+    for name, model in zip(
+        ["baseline", "extended"],
+        ["1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8", "1-t_jh7ajCUZRSm2EwUK4cLqAcZ2-Q6zK"],
+    ):
+        logging.debug(f"Downloading {name} model from drive...")
+        mod_weights_path = load_from_gdrive(gd_id="1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8")
+        predictions_dict = topk_for_all_customers(
+            mod_weights_path,
+            test_data=data,
+            n_customer_threshold=200,
+            remove_pth_file_after_load=True,
+            baseline=True,
         )
-    if persisted_dataset_path is None:
-        df_c = pd.read_csv("dataset/customers.csv")
-        # Articles IDs all start with 0 which disappears if cast to a number
-        df_a = pd.read_csv("dataset/articles.csv", dtype={"article_id": str})
-        df_t = pd.read_csv(transactions_path, dtype={"article_id": str})
-        df_c = clean_customer_data(df_c)
-        df_a = clean_article_data(df_a)
-
-        dataset_params = {
-            "total_cases": hyperparams.dataset_cases,
-            "portion_negatives": hyperparams.dataset_portion_negatives,
-            "df_transactions": df_t,
-            "train_portion": hyperparams.dataset_train_portion,
-            "batch_size": hyperparams.datset_batch_size,
-        }
-        data = Data_HM(**dataset_params)
-        save_dataset_obj(
-            data,
-            f"object_storage/dataset-{datetime.today().strftime('%Y.%m.%d.%H.%M')}.pckl",
+        try:
+            save_dataset_obj(predictions_dict, "object_storage/preds-dec6.pckl")
+        except Exception as e:
+            logging.exception(f"Unable to store predictions dict for some reason!\n{e}")
+            logging.exception("Falling back on ugly solution under debug.")
+            logging.debug(predictions_dict)
+        logging.debug("Finished making predictions, now computing MAP")
+        average_precision = compute_map(
+            predictions_dict, data, use_all_data_as_ground_truth=False
         )
-    else:
-        data = read_dataset_obj(persisted_dataset_path)
-        logging.debug("Read dataset successfully")
+        logging.debug(average_precision)
+        logging.info(f"Computed MAP: {average_precision.mean()}")
 
-    model = load_model(baseline, data, hyperparams.embedding_size)
-    logging.debug("Created model sucessfully")
-    last_valid_loss = train(model, data, hyperparams, baseline, plot_loss=True)
-    if save_model:
-        if isinstance(save_model, bool):
-            save_model = datetime.today().strftime("%Y.%m.%d.%H.%M") + ".pth"
-        torch.save(model.state_dict(), os.path.join("models", save_model))
-    return last_valid_loss
+
+@try_except_action
+def action_savemodel():
+    logging.debug("Training model to save")
+    hyperparams = Hyperparameters(
+        lr_rate=1e-2,
+        weight_decay=1e-4,
+        embedding_size=500,
+        save_loss="baseline200k",
+        verbose=True,
+    )
+    logging.debug(f"With params {hyperparams.__dict__}")
+    load_dataset_and_train(
+        persisted_dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
+        save_model=True,
+        hyperparams=hyperparams,
+        baseline=True,
+    )
+
+
+@try_except_action
+def action_fulldata():
+    # Baseline iwth full data
+    load_dataset_and_train(
+        transactions_path="object_storage/transactions.pckl",
+        hyperparams=Hyperparameters(
+            weight_decay=0,
+            dataset_cases=2 * 31_788_324,
+            dataset_portion_negatives=0.5,
+            dataset_train_portion=0.7,
+            dataset_batch_size=128,
+            dataset_full=True,
+        ),
+    )
+
+
+@try_except_action
+def action_baseline():
+    logging.debug("Starting training of baseline - with some weight analysis")
+    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
+    model = load_model(baseline=True, data=data, emb_sz=500, bias=False)
+    hyperparams = Hyperparameters(
+        lr_rate=1e-2,
+        weight_decay=1e-4,
+        embedding_size=500,
+        save_loss=True,
+        verbose=True,
+    )
+    logging.debug(f"Starting training of model with parameters {hyperparams.__dict__}")
+    last_validation_loss = train(
+        model, data, hyperparams, baseline=True, plot_loss=True
+    )
+    logging.debug("Model done with training (and loss plots stored to disk)")
+
+    # Prints info on the weights to log
+    for parameter in model.named_parameters():
+        max_value = parameter[1].detach().numpy().max()
+        logging.info(f"Parameter {parameter[0]} has max value {max_value}")
+
+    del model  # Ensuring the weights aren't part of new model
+    model = load_model(baseline=True, data=data, emb_sz=500, bias=False)
+    hyperparams = Hyperparameters(
+        lr_rate=1e-2, weight_decay=0, embedding_size=500, save_loss=True, verbose=True
+    )
+    logging.debug(f"Starting training of model with parameters {hyperparams.__dict__}")
+    last_validation_loss = train(
+        model, data, hyperparams, baseline=True, plot_loss=True
+    )
+    logging.debug("Second model done with training (and loss plots stored to disk)")
+
+    # Prints info on the weights to log
+    for parameter in model.named_parameters():
+        max_value = parameter[1].detach().numpy().max()
+        logging.info(f"Parameter {parameter[0]} has max value {max_value}")
+
+    logging.debug("Finished action sucessfully. Exiting ...")
 
 
 if __name__ == "__main__":
-    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
-    valid_data = data.get_data_from_subset(data.val)
-    valid_data = valid_data[valid_data["label"] == 1]
-    articles_per_customer = valid_data.groupby("customer_id")["article_id"].count()
-    print(articles_per_customer)
-    print(articles_per_customer.mean())
-    # logging.basicConfig(
-    #     filename="markov_run.log",
-    #     # encoding="utf-8", # Not present in Python 3.8...
-    #     level=logging.DEBUG,
-    #     format="%(asctime)s %(levelname)s %(message)s",
-    # )
-    # logging.debug("Starting param exploration for extended model")
-    # try:
-    #     alternative_hyperparam_exploration(
-    #         wds=(1e-4, 1e-3, 1e-1),
-    #         embszs=(500, 100, 1000),
-    #         lrs=(1e-2, 1e-3, 1e-4),
-    #         dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
-    #         baseline=False,
-    #     )
-    # except Exception as e:
-    #     logging.exception(f"Traceback in main! {e}")
-    #     raise e
 
-    # logging.debug("Starting hyperparameter exploration of baseline")
-    # try:
-    #     alternative_hyperparam_exploration(
-    #         wds=(1e-4, 1e-3, 1e-1),
-    #         embszs=(500, 100, 1000),
-    #         lrs=(1e-2, 1e-3, 1e-4),
-    #         dataset_path="object_storage/dataset-2022.11.26.12.04.pckl",
-    #         baseline=True,
-    #     )
-    # except Exception as e:
-    #     logging.exception(f"Traceback in main! {e}")
-    #     raise e
+    logging.basicConfig(
+        filename="markov_run.log",
+        # encoding="utf-8", # Not present in Python 3.8...
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-action", help="What type of action to run...")
+    args = parser.parse_args()
+    action = args.action
+    logging.debug(f"4-shh-compatible called with action flag: {action}")
+    possible_actions = "(hyperparams, map, savemodel, baseline, fulldata)"
+
+    if action == "hyperparams":
+        action_hyperparams()
+    elif action == "map":
+        action_map()
+    elif action == "savemodel":
+        action_savemodel()
+    elif action == "baseline":
+        action_baseline()
+    elif action == "fulldata":
+        action_fulldata()
+    elif action is None:
+        print(f"Please provide -action flag when running {possible_actions}")
+    else:
+        print(f"Action not recognized. Possible actions: {possible_actions}")
