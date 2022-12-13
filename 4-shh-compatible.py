@@ -686,6 +686,26 @@ def load_dataset_and_train(
         torch.save(model.state_dict(), os.path.join("models", save_model))
     return last_valid_loss
 
+def get_k_most_purchased(
+    k: int, transactions_path: str, pass_as_df: bool = False
+) -> pd.DataFrame:
+    if pass_as_df:
+        df = transactions_path
+    elif transactions_path.endswith("pckl"):
+        df = pd.read_pickle(transactions_path)
+    else:
+        df = pd.read_csv(transactions_path, dtype={"article_id": str})
+    return (
+        df.groupby("article_id")
+        .agg("customer_id")
+        .count()
+        .sort_values(ascending=False)
+        .head(k)
+    )
+    # Alternative:
+        # For each user, find index group for transactions it has done and get the most popular index group
+        # Return the most popular items in said index group
+
 
 # <<<<< MODEL DEFINITION AND TRAINING
 
