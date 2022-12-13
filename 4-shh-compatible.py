@@ -239,6 +239,14 @@ class Data_HM_Complete(Data_HM):
         articles = df_transactions["article_id"].unique()
         n_positive = round(total_cases * (1 - portion_negatives))
         n_negative = total_cases - n_positive  # mu inferred implicitly from here
+
+        logging.debug(f"Sampling {n_positive} positives from dataframe")
+        # Lazy evalution: if we have to sample 99% of the data, we just take everything
+        if n_positive < 0.99*len(df_transactions):
+            positive_samples = df_transactions.sample(n=n_positive,replace=False)
+        else:
+            positive_samples = df_transactions
+
         logging.debug(f"Generating {n_negative} random negative samples")
         samples = pd.DataFrame(
             {
@@ -259,19 +267,24 @@ class Data_HM_Complete(Data_HM):
         logging.debug("Indexing out false negatives")
         samples = samples.loc[samples["_merge"] == "left_only"].drop("_merge", axis=1)
 
-        df_transactions["label"] = 1
+        positive_samples["label"] = 1
         samples["label"] = 0
+
         logging.debug(
             "Added labels. Now: concat of positive and negative plus a shuffle of all data"
         )
         samples = (
-            pd.concat((df_transactions, samples)).sample(frac=1).reset_index(drop=True)
+            pd.concat((positive_samples, samples)).sample(frac=1).reset_index(drop=True)
         )
+
+        customers_in_sample = samples["customer_id"].unique()
+        articles_in_sample = samples["article_id"].unique()
+
         le_cust = LabelEncoder()
         le_art = LabelEncoder()
         logging.debug("Fitting label encoders")
-        le_cust.fit(customers)
-        le_art.fit(articles)
+        le_cust.fit(customers_in_sample)
+        le_art.fit(articles_in_sample)
 
         # Doing as much as possible in-place here:
         logging.debug("Transforming IDs to label-encoded IDs")
@@ -298,22 +311,22 @@ class HM_model(torch.nn.Module):
     """Baseline HM model"""
 
     def __init__(
-        self, num_customer, num_articles, embedding_size, bias_nodes: bool = True
+        self, num_customer, num_articles, embedding_size, bias_nodes: bool = True, sparse: bool = False
     ):
         super(HM_model, self).__init__()
         self.customer_embed = torch.nn.Embedding(
-            num_embeddings=num_customer, embedding_dim=embedding_size
+            num_embeddings=num_customer, embedding_dim=embedding_size, sparse=sparse
         )
         self.art_embed = torch.nn.Embedding(
-            num_embeddings=num_articles, embedding_dim=embedding_size
+            num_embeddings=num_articles, embedding_dim=embedding_size, sparse=sparse
         )
         if not bias_nodes:  # Default is that we DO have biases
             # They're added lienarly so this should give no effect
             self.customer_bias = lambda row: 0
             self.article_bias = lambda row: 0
         else:
-            self.customer_bias = torch.nn.Embedding(num_customer, 1)
-            self.article_bias = torch.nn.Embedding(num_articles, 1)
+            self.customer_bias = torch.nn.Embedding(num_customer, 1, sparse=sparse)
+            self.article_bias = torch.nn.Embedding(num_articles, 1, sparse=sparse)
 
     def forward(self, customer_row, article_row):
         """The forward pass used in model training (matrix factorization)
@@ -326,6 +339,7 @@ class HM_model(torch.nn.Module):
             Tensor: Activation of U@V^T + B_u + B_v
         """
         customer_embed = self.customer_embed(customer_row)
+
         art_embed = self.art_embed(article_row)
         # dot_prod_old = torch.sum(torch.mul(customer_embed, art_embed), 1)
         dot_prod = (customer_embed * art_embed).sum(dim=1, keepdim=True)
@@ -448,8 +462,10 @@ class Hyperparameters:
     validation_frequency: int = 1
     optimizer: Any = torch.optim.Adam
     embedding_size: int = 500
+    bias_nodes : bool = True
     save_loss: Union[bool, str] = True
     verbose: bool = False
+    min_lr: float = 0.0 # For LR scheduler
     # These have no use if dataset is loaded from file
     dataset_cases: int = 2000
     dataset_portion_negatives: float = 0.9
@@ -518,12 +534,17 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Uses binary cross entropy at the moment.
     loss_metric = torch.nn.BCELoss().to(device)
-    optimizer = params.optimizer(
-        model.parameters(), lr=params.lr_rate, weight_decay=params.weight_decay
-    )
+    if params.optimizer == "SparseAdam":
+        # Does not have weight decay parameter
+        optimizer = torch.optim.SparseAdam(model.parameters(), lr=params.lr_rate)
+    else:
+        optimizer = params.optimizer(
+            model.parameters(), lr=params.lr_rate, weight_decay=params.weight_decay
+        )
+    
 
     # Adjust lr once model stops improving using scheduler
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,min_lr=params.min_lr,verbose=params.verbose)
 
     save_loss = params.save_loss
     if save_loss:
@@ -582,7 +603,7 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
         save_dir = os.path.join("results", datetime.today().strftime("%Y.%m.%d.%H.%M"))
         if not os.path.isdir(save_dir):
             os.makedirs(save_dir)
-        filename = os.path.join(save_dir, f"losses_{fn_append}.csv")
+        filename = os.path.join(save_dir, f"losses_{fn_append}.csv").replace("<","").replace(">","")
         np.savetxt(
             filename,
             np.transpose([train_losses, valid_losses]),
@@ -654,7 +675,7 @@ def load_dataset_and_train(
         data = read_dataset_obj(persisted_dataset_path)
         logging.debug("Read dataset successfully")
 
-    model = load_model(baseline, data, hyperparams.embedding_size)
+    model = load_model(baseline, data, hyperparams.embedding_size, hyperparams.bias_nodes)
     logging.debug("Created model sucessfully")
     last_valid_loss = train(model, data, hyperparams, baseline, plot_loss=True)
     if save_model:
@@ -858,7 +879,7 @@ def load_from_gdrive(gd_id: str, outpath: str = "tmp_model.pth") -> None:
 
 
 def load_model(
-    baseline: bool, data: Data_HM, emb_sz: int = 500, bias: bool = True
+    baseline: bool, data: Data_HM, emb_sz: int = 500, bias: bool = True, sparse: bool = False
 ) -> object:
     """Based on baseline flag, retrieves model and ensures column types are correct.
 
@@ -867,6 +888,7 @@ def load_model(
         data (Data_HM): Original Dataset object (NB self.df_id can be modified when passed).
         emb_sz (int, optional): Embedding size, must match size in `data`. Defaults to 500.
         bias (bool, optional): Bias flags (include bias nodes or not). Defaults to True.
+        sparse (bool, optional): Sparse property to model embeddings. Defaults to False
 
     Returns:
         object: HM_model or HM_Extended
@@ -874,7 +896,7 @@ def load_model(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     n_cust, n_art, *_ = data.df_id.nunique()
     if baseline:
-        model = HM_model(n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias).to(
+        model = HM_model(n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias, sparse=sparse).to(
             device
         )
     else:
@@ -1175,17 +1197,21 @@ def compute_map(
 
         # Ground truth from entire database:
         logging.debug("Reading ground truth ...")
-        ground_truth = pd.read_csv(
-            "dataset/transactions_train.csv",
-            dtype={"article_id": str},
-            usecols=["customer_id", "article_id"],
-        )
+        ground_truth = pd.read_pickle("object_storage/transactions.pckl")
+        # ground_truth = pd.read_csv( # Alternative method if csv is stored to disk.
+        #     "dataset/transactions_train.csv",
+        #     dtype={"article_id": str},
+        #     usecols=["customer_id", "article_id"],
+        # )
+
         ground_truth = ground_truth[
-            ground_truth["customer_id"].isin(list(decoded_preds.keys()))
+            ground_truth["customer_id"].isin(list(best_preds.keys()))
         ]
+        logging.debug("Grouping ground truth by customer")
         ground_truth = (
             ground_truth.groupby("customer_id").agg({"article_id": list}).reset_index()
         )
+        logging.debug(f"Head of ground_truth\n{ground_truth.head()}")
     else:
         logging.debug("Loading only data in validation set")
         ground_truth = (  # This only checks the true values of the validation set
@@ -1195,23 +1221,23 @@ def compute_map(
             .reset_index()
         )
     # Load model predictions to dataframe
+    logging.debug("Converting best_preds to dataframe")
     preds = pd.DataFrame.from_dict(best_preds, orient="index").reset_index()
     preds.columns = ["customer_id", "est_article_id"]
-    logging.debug(
-        f"Value counts before removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}"
-    )
+    logging.debug(f"Head of preds\n{preds.head()}")
 
-    # Remove duplicates
+    # Remove duplicates (i.e. where U bought V several times)
     ground_truth["article_id"] = ground_truth["article_id"].apply(
         lambda c: list(set(c))
     )
-    logging.debug(
-        f"Value counts after removing article duplicates\n {ground_truth['article_id'].apply(len).value_counts().to_dict()}"
-    )
-
+    logging.debug("Merging ground truth with preds")
     merged = ground_truth.merge(preds)
+    # Just having a look making sure everything looks good with the new thing
+    logging.debug(f"Columns of merged DF: {merged.columns}")
+    logging.debug(f"Merged has length {len(merged)} and preds had {len(preds)}.")
+    ## 
     from utils.metrics import prec, rel
-
+    logging.debug("Computing MAP ...")
     # Compute average precision here
     average_precision = merged.apply(
         lambda x: sum(
@@ -1270,6 +1296,16 @@ def action_hyperparams():
 def action_map():
     logging.debug("Computing MAP for model")
     data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
+    with open("object_storage/preds-dec6.pckl", 'rb') as f: # This file is preds from extended model btw
+        predictions_dict = pickle.load(f)
+    logging.debug("Loaded predictions from file. Computing first MAP with all data")
+    map_from_full_data = compute_map(predictions_dict, data, use_all_data_as_ground_truth=True)
+    logging.debug("Computing second MAP, not with all data")
+    map_from_validation = compute_map(predictions_dict, data, use_all_data_as_ground_truth=False)
+    logging.debug(f"With all data: {map_from_full_data.mean()}")
+    logging.debug(f"With validation only: {map_from_validation.mean()}")
+    exit()
+    ### Gutta backer
     for name, model in zip(
         ["baseline", "extended"],
         ["1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8", "1-t_jh7ajCUZRSm2EwUK4cLqAcZ2-Q6zK"],
@@ -1322,34 +1358,92 @@ def action_fulldata():
     load_dataset_and_train(
         transactions_path="object_storage/transactions.pckl",
         hyperparams=Hyperparameters(
+            lr_rate=1e-2,
+            min_lr=1e-3,
+            epochs=10,
             weight_decay=0,
-            dataset_cases=2 * 31_788_324,
+            dataset_cases=1_000_000, #2 * 31_788_324,
             dataset_portion_negatives=0.5,
             dataset_train_portion=0.7,
             dataset_batch_size=128,
             dataset_full=True,
+            bias_nodes=False,
+            save_loss="NO_BIAS"
         ),
     )
+    load_dataset_and_train(
+        transactions_path="object_storage/transactions.pckl",
+        hyperparams=Hyperparameters(
+            lr_rate=1e-2,
+            min_lr=1e-3,
+            epochs=10,
+            weight_decay=0,
+            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_portion_negatives=0.5,
+            dataset_train_portion=0.7,
+            dataset_batch_size=128,
+            dataset_full=True,
+            bias_nodes=True,
+            save_loss="WITH_BIAS"
+        ),
+    )
+    load_dataset_and_train(
+        transactions_path="object_storage/transactions.pckl",
+        hyperparams=Hyperparameters(
+            lr_rate=1e-4,
+            min_lr=1e-3,
+            epochs=10,
+            weight_decay=0,
+            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_portion_negatives=0.5,
+            dataset_train_portion=0.7,
+            dataset_batch_size=128,
+            dataset_full=True,
+            bias_nodes=False
+        ),
+    )
+    load_dataset_and_train(
+        transactions_path="object_storage/transactions.pckl",
+        hyperparams=Hyperparameters(
+            lr_rate=1e-5,
+            min_lr=1e-3,
+            epochs=10,
+            weight_decay=0,
+            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_portion_negatives=0.5,
+            dataset_train_portion=0.7,
+            dataset_batch_size=128,
+            dataset_full=True,
+            bias_nodes=False
+        ),
+    )
+
 
 
 @try_except_action
 def action_baseline():
     logging.debug("Starting training of baseline - with some weight analysis")
-    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
-    model = load_model(baseline=True, data=data, emb_sz=500, bias=False)
+    df0 = pd.read_pickle("object_storage/transactions.pckl")
+    data = Data_HM_Complete(total_cases=2 * 31_788_324, portion_negatives=0.5,df_transactions=df0,batch_size=128,train_portion=0.7)
+    model = load_model(baseline=True, data=data, emb_sz=500, bias=False, sparse=True)
     hyperparams = Hyperparameters(
-        lr_rate=1e-2,
-        weight_decay=1e-4,
+        lr_rate=0.01,
+        epochs=5,
+        optimizer="SparseAdam",
+        weight_decay=0,
         embedding_size=500,
-        save_loss=True,
+        save_loss="sparseAdam",
+        bias_nodes=False,
         verbose=True,
+        dataset_full=True,
+        min_lr=0.01 # So that LR doesnt change
     )
     logging.debug(f"Starting training of model with parameters {hyperparams.__dict__}")
     last_validation_loss = train(
         model, data, hyperparams, baseline=True, plot_loss=True
     )
-    logging.debug("Model done with training (and loss plots stored to disk)")
-
+    logging.debug(f"Model done with training (and loss plots stored to disk). Last validation loss {last_validation_loss}")
+    exit() # TODO temporary!
     # Prints info on the weights to log
     for parameter in model.named_parameters():
         max_value = parameter[1].detach().numpy().max()
@@ -1373,6 +1467,44 @@ def action_baseline():
 
     logging.debug("Finished action sucessfully. Exiting ...")
 
+@try_except_action
+def action_predvalues():
+    """ We load the model and predictions, and re-evaluate the model for the best predicitons to AFAP find the model's confidence"""
+    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    baseline = True
+    model = load_model(baseline=baseline, data=data, emb_sz=500, bias=True)
+    mod_weights_path = load_from_gdrive(gd_id="1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8")
+    model.load_state_dict(torch.load(mod_weights_path, map_location=torch.device(device)))
+    os.remove(mod_weights_path)
+    with open("object_storage/preds-dec6.pckl", 'rb') as f:
+        best_predictions = pickle.load(f)
+    prediction_values = {}
+    logging.debug("All stuff has been loaded sucessfully.")
+
+    model.eval()
+    for customer_id, article_ids in best_predictions.items():
+        # logging.debug(f"{customer_id}: {article_ids[0]}")
+        article_tensor = torch.IntTensor(article_ids[0]) # Flatten list
+        customer_tensor = torch.IntTensor([customer_id]).expand(article_tensor.shape[0])
+        prediction = model(customer_tensor, article_tensor)
+        prediction_values[customer_id] = prediction.detach().numpy() # hopefully 12-length list
+    logging.debug("Done with finding predictions. Creating plot of confidence.")
+    
+    averages = []
+    maxes = []
+    for predictions in prediction_values.values():
+        averages.append(predictions.mean())
+        maxes.append(predictions.max())
+    plt.plot(averages, "o", color="grey", markersize=1, label="Average value")
+    plt.plot(maxes, "ro", markersize=1, label="Max value")
+    plt.legend()
+    plt.xlabel("Customer index ID")
+    plt.ylabel("Confidence (0%-100%)")
+    save_path = "average_prediction_confidence.pdf"
+    plt.savefig(save_path)
+    logging.debug(f"Saved plot to {save_path}")
+
 
 if __name__ == "__main__":
 
@@ -1389,7 +1521,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     action = args.action
     logging.debug(f"4-shh-compatible called with action flag: {action}")
-    possible_actions = "(hyperparams, map, savemodel, baseline, fulldata)"
+    possible_actions = "(hyperparams, map, savemodel, baseline, fulldata, predvalues)"
 
     if action == "hyperparams":
         action_hyperparams()
@@ -1401,6 +1533,8 @@ if __name__ == "__main__":
         action_baseline()
     elif action == "fulldata":
         action_fulldata()
+    elif action == "predvalues":
+        action_predvalues()
     elif action is None:
         print(f"Please provide -action flag when running {possible_actions}")
     else:
