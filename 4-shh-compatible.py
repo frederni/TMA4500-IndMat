@@ -242,8 +242,8 @@ class Data_HM_Complete(Data_HM):
 
         logging.debug(f"Sampling {n_positive} positives from dataframe")
         # Lazy evalution: if we have to sample 99% of the data, we just take everything
-        if n_positive < 0.99*len(df_transactions):
-            positive_samples = df_transactions.sample(n=n_positive,replace=False)
+        if n_positive < 0.99 * len(df_transactions):
+            positive_samples = df_transactions.sample(n=n_positive, replace=False)
         else:
             positive_samples = df_transactions
 
@@ -311,7 +311,12 @@ class HM_model(torch.nn.Module):
     """Baseline HM model"""
 
     def __init__(
-        self, num_customer, num_articles, embedding_size, bias_nodes: bool = True, sparse: bool = False
+        self,
+        num_customer,
+        num_articles,
+        embedding_size,
+        bias_nodes: bool = True,
+        sparse: bool = False,
     ):
         super(HM_model, self).__init__()
         self.customer_embed = torch.nn.Embedding(
@@ -461,11 +466,13 @@ class Hyperparameters:
     epochs: int = 20
     validation_frequency: int = 1
     optimizer: Any = torch.optim.Adam
+    lossfnc: Any = torch.nn.BCELoss
     embedding_size: int = 500
-    bias_nodes : bool = True
+    bias_nodes: bool = True
     save_loss: Union[bool, str] = True
     verbose: bool = False
-    min_lr: float = 0.0 # For LR scheduler
+    min_lr: float = 0.0  # For LR scheduler
+
     # These have no use if dataset is loaded from file
     dataset_cases: int = 2000
     dataset_portion_negatives: float = 0.9
@@ -533,7 +540,7 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Uses binary cross entropy at the moment.
-    loss_metric = torch.nn.BCELoss().to(device)
+    loss_metric = params.lossfnc().to(device)
     if params.optimizer == "SparseAdam":
         # Does not have weight decay parameter
         optimizer = torch.optim.SparseAdam(model.parameters(), lr=params.lr_rate)
@@ -541,10 +548,11 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
         optimizer = params.optimizer(
             model.parameters(), lr=params.lr_rate, weight_decay=params.weight_decay
         )
-    
 
     # Adjust lr once model stops improving using scheduler
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,min_lr=params.min_lr,verbose=params.verbose)
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, min_lr=params.min_lr, verbose=params.verbose
+    )
 
     save_loss = params.save_loss
     if save_loss:
@@ -556,6 +564,8 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
 
     for epoch in tqdm(range(params.epochs)):
         model.train()
+        dataloader_train = data.get_DataLoader(trainDL=True)
+        dataloader_valid = data.get_DataLoader(trainDL=False)
         epoch_loss = train_one_epoch(
             model,
             data,
@@ -569,7 +579,7 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
             # Validate step
             model.eval()
             valid_loss = 0.0
-            for item in data.get_DataLoader(trainDL=False):
+            for item in dataloader_valid:
                 item = tuple(t.to(device) for t in item)
                 row, label = item
                 if not baseline:
@@ -586,24 +596,24 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
             if params.verbose:
                 logging.info(f"Provisory results for epoch {epoch+1}:")
                 logging.info(
-                    f"Loss for training set\t{epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))}"
+                    f"Loss for training set\t{epoch_loss.tolist() / len(dataloader_train)}"
                 )
                 logging.info(
-                    f"Loss for validation set\t{valid_loss / len(data.get_DataLoader(trainDL=False))}"
+                    f"Loss for validation set\t{valid_loss / len(dataloader_valid)}"
                 )
             if save_loss:
-                train_losses.append(
-                    epoch_loss.tolist() / len(data.get_DataLoader(trainDL=True))
-                )
-                valid_losses.append(
-                    valid_loss / len(data.get_DataLoader(trainDL=False))
-                )
+                train_losses.append(epoch_loss.tolist() / len(dataloader_train))
+                valid_losses.append(valid_loss / len(dataloader_valid))
     if save_loss:
         fn_append = save_loss if isinstance(save_loss, str) else ""
         save_dir = os.path.join("results", datetime.today().strftime("%Y.%m.%d.%H.%M"))
         if not os.path.isdir(save_dir):
             os.makedirs(save_dir)
-        filename = os.path.join(save_dir, f"losses_{fn_append}.csv").replace("<","").replace(">","")
+        filename = (
+            os.path.join(save_dir, f"losses_{fn_append}.csv")
+            .replace("<", "")
+            .replace(">", "")
+        )
         np.savetxt(
             filename,
             np.transpose([train_losses, valid_losses]),
@@ -618,7 +628,7 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
             )
             # # If you want to remove the csv files of the losses, you can call `os.remove(filename)` here
             # os.remove(filename)
-    return valid_loss / len(data.get_DataLoader(trainDL=False))
+    return valid_loss / len(dataloader_valid)
 
 
 def load_dataset_and_train(
@@ -675,7 +685,9 @@ def load_dataset_and_train(
         data = read_dataset_obj(persisted_dataset_path)
         logging.debug("Read dataset successfully")
 
-    model = load_model(baseline, data, hyperparams.embedding_size, hyperparams.bias_nodes)
+    model = load_model(
+        baseline, data, hyperparams.embedding_size, hyperparams.bias_nodes
+    )
     logging.debug("Created model sucessfully")
     last_valid_loss = train(model, data, hyperparams, baseline, plot_loss=True)
     if save_model:
@@ -685,6 +697,51 @@ def load_dataset_and_train(
             os.mkdir("models")
         torch.save(model.state_dict(), os.path.join("models", save_model))
     return last_valid_loss
+
+
+def get_k_most_purchased(
+    k: int,
+    transactions_path: Union[str, pd.DataFrame],
+    pass_as_df: bool = False,
+    by_index_group: Union[bool, int] = False,
+    bulk_index_group=None,
+) -> np.ndarray:
+    if isinstance(transactions_path, str):
+        if transactions_path.endswith("pckl"):
+            df = pd.read_pickle(transactions_path)
+        else:
+            df = pd.read_csv(transactions_path, dtype={"article_id": str})
+    else:
+        df = transactions_path
+    if by_index_group:
+        logging.debug(f"Accessing topk based on index group {by_index_group}")
+        _, df_articles = load_kaggle_assets(["customers.csv", "articles.csv"])
+        if bulk_index_group is not None:
+            out = []
+            for index_group in bulk_index_group:
+                df_i = df[df["index_group_no"] == index_group]
+                out.append(
+                    df_i.groupby("article_id")
+                    .agg("customer_id")
+                    .count()
+                    .sort_values(ascending=False)
+                    .head(k)
+                    .index.values
+                )
+            return out
+
+        df_articles[df_articles["index_group_no"] == by_index_group]
+        df_articles = df_articles[["article_id", "index_group_no"]]
+        df = df.merge(df_articles, on="article_id")
+
+    return (
+        df.groupby("article_id")
+        .agg("customer_id")
+        .count()
+        .sort_values(ascending=False)
+        .head(k)
+        .index.values
+    )
 
 
 # <<<<< MODEL DEFINITION AND TRAINING
@@ -879,7 +936,11 @@ def load_from_gdrive(gd_id: str, outpath: str = "tmp_model.pth") -> None:
 
 
 def load_model(
-    baseline: bool, data: Data_HM, emb_sz: int = 500, bias: bool = True, sparse: bool = False
+    baseline: bool,
+    data: Data_HM,
+    emb_sz: int = 500,
+    bias: bool = True,
+    sparse: bool = False,
 ) -> object:
     """Based on baseline flag, retrieves model and ensures column types are correct.
 
@@ -896,9 +957,9 @@ def load_model(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     n_cust, n_art, *_ = data.df_id.nunique()
     if baseline:
-        model = HM_model(n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias, sparse=sparse).to(
-            device
-        )
+        model = HM_model(
+            n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias, sparse=sparse
+        ).to(device)
     else:
         additional_columns = {"age", "garment_group_no", "index_group_no"}
         if additional_columns == additional_columns.intersection(
@@ -1096,6 +1157,42 @@ def split_test_set_file():
 # >>>>> INFERENCE
 
 
+def predictions_aggregator(data: Data_HM, by_index: bool = True):
+    """Get k top predictions for customer only based on what index group it has the most purchases in"""
+    if not by_index:
+        df = data.df_id[data.df_id["label"] == 1].drop("label", axis=1)
+        top_predictions = get_k_most_purchased(12, df).tolist()
+        return {customer: [top_predictions] for customer in df["customer_id"].unique()}
+
+    df = _extend_row_data(data, [], ["index_group_no"])  # df_id
+    train = data.get_data_from_subset(data.train)  # train set of df_id
+    df = df.merge(train)
+    df = df[df["label"] == 1].drop("label", axis=1)
+    logging.debug(f"DF has now rows {df.columns} and is of length {len(df)}.")
+    all_index_groups = df["index_group_no"].unique()
+    all_top_predictions = get_k_most_purchased(
+        k=12,
+        transactions_path=df,
+        pass_as_df=True,  # TODO unused currently
+        by_index_group=True,
+        bulk_index_group=all_index_groups,
+    )
+    top_predictions = {
+        index_group: value
+        for index_group, value in zip(all_index_groups, all_top_predictions)
+    }
+    logging.debug(top_predictions)
+    best_preds = {}
+    group = df.groupby("customer_id").agg({"index_group_no": list}).reset_index()
+    group["index_group_no"] = group["index_group_no"].apply(
+        lambda lst: max(set(lst), key=lst.count)
+    )
+    for idx, row in group.iterrows():
+        best_preds[row.customer_id] = [top_predictions[row.index_group_no].tolist()]
+
+    return best_preds
+
+
 @torch.inference_mode()
 def topk_for_all_customers(
     model_path,
@@ -1189,8 +1286,8 @@ def compute_map(
     if use_all_data_as_ground_truth:
         logging.debug("Returning best predicted values back to true IDs ...")
         decoded_preds = dict()
-        for k, v in best_preds.items():
-            unenc_k = test_data.le_cust.inverse_transform([k])[0]
+        for key, v in best_preds.items():
+            unenc_k = test_data.le_cust.inverse_transform([key])[0]
             unenc_v = test_data.le_art.inverse_transform(v[0])
             decoded_preds[unenc_k] = [unenc_v]
         best_preds = decoded_preds  # Overwrites best_preds
@@ -1214,7 +1311,7 @@ def compute_map(
         logging.debug(f"Head of ground_truth\n{ground_truth.head()}")
     else:
         logging.debug("Loading only data in validation set")
-        ground_truth = (  # This only checks the true values of the validation set
+        ground_truth = (  # This only checks the true values of the (training and) validation set
             test_data.df_id[test_data.df_id["label"] == 1]
             .groupby("customer_id")
             .agg({"article_id": list})
@@ -1235,21 +1332,23 @@ def compute_map(
     # Just having a look making sure everything looks good with the new thing
     logging.debug(f"Columns of merged DF: {merged.columns}")
     logging.debug(f"Merged has length {len(merged)} and preds had {len(preds)}.")
-    ## 
+    ##
     from utils.metrics import prec, rel
+
     logging.debug("Computing MAP ...")
     # Compute average precision here
-    average_precision = merged.apply(
-        lambda x: sum(
-            [
-                prec(i, x.est_article_id, x.article_id)
-                * rel(i, x.est_article_id, x.article_id)
-                for i in range(1, k + 1)
-            ]
+    average_precision = np.zeros(merged.shape[0])
+    for row_num, row in tqdm(merged.iterrows()):
+        ap = 0
+        truth = np.array(row.article_id)
+        preds = np.array(row.est_article_id)
+        for i in range(1, 12 + 1):  # range(1,k+1):
+            if preds[i - 1] in truth:
+                ap = ap + len(np.intersect1d(preds[:i], truth)) / i
+        average_precision[row_num] = ap / min(
+            k, len(row.est_article_id), len(row.article_id)
         )
-        / min(k, len(x.est_article_id)),
-        axis=1,
-    )
+
     # Returns average precision for each customer instead of taking the mean (== MAP@k)
     return average_precision
 
@@ -1295,13 +1394,32 @@ def action_hyperparams():
 @try_except_action
 def action_map():
     logging.debug("Computing MAP for model")
-    data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
-    with open("object_storage/preds-dec6.pckl", 'rb') as f: # This file is preds from extended model btw
-        predictions_dict = pickle.load(f)
+    data = read_dataset_obj(
+        "object_storage/dataset-2022.11.26.12.04.pckl"
+    )  # 200k samples
+    res_simple_agg_full = compute_map(
+        predictions_aggregator(data, by_index=False), data, 12, True
+    )
+    res_simple_agg_valid = compute_map(
+        predictions_aggregator(data, by_index=False), data, 12, False
+    )
+    logging.info(
+        f"With all data: {res_simple_agg_full.mean()}, with validation data: {res_simple_agg_valid.mean()}."
+    )
+    exit()
+    res = compute_map(predictions_aggregator(data), data, 12, True)
+    logging.info(f"With all data: {res.mean()}")
+    res = compute_map(predictions_aggregator(data), data, 12, False)
+    logging.info(f"With validation only: {res.mean()}")
+    exit()
     logging.debug("Loaded predictions from file. Computing first MAP with all data")
-    map_from_full_data = compute_map(predictions_dict, data, use_all_data_as_ground_truth=True)
+    map_from_full_data = compute_map(
+        predictions_dict, data, use_all_data_as_ground_truth=True
+    )
     logging.debug("Computing second MAP, not with all data")
-    map_from_validation = compute_map(predictions_dict, data, use_all_data_as_ground_truth=False)
+    map_from_validation = compute_map(
+        predictions_dict, data, use_all_data_as_ground_truth=False
+    )
     logging.debug(f"With all data: {map_from_full_data.mean()}")
     logging.debug(f"With validation only: {map_from_validation.mean()}")
     exit()
@@ -1362,13 +1480,13 @@ def action_fulldata():
             min_lr=1e-3,
             epochs=10,
             weight_decay=0,
-            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_cases=1_000_000,  # 2 * 31_788_324,
             dataset_portion_negatives=0.5,
             dataset_train_portion=0.7,
             dataset_batch_size=128,
             dataset_full=True,
             bias_nodes=False,
-            save_loss="NO_BIAS"
+            save_loss="NO_BIAS",
         ),
     )
     load_dataset_and_train(
@@ -1378,13 +1496,13 @@ def action_fulldata():
             min_lr=1e-3,
             epochs=10,
             weight_decay=0,
-            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_cases=1_000_000,  # 2 * 31_788_324,
             dataset_portion_negatives=0.5,
             dataset_train_portion=0.7,
             dataset_batch_size=128,
             dataset_full=True,
             bias_nodes=True,
-            save_loss="WITH_BIAS"
+            save_loss="WITH_BIAS",
         ),
     )
     load_dataset_and_train(
@@ -1394,12 +1512,12 @@ def action_fulldata():
             min_lr=1e-3,
             epochs=10,
             weight_decay=0,
-            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_cases=1_000_000,  # 2 * 31_788_324,
             dataset_portion_negatives=0.5,
             dataset_train_portion=0.7,
             dataset_batch_size=128,
             dataset_full=True,
-            bias_nodes=False
+            bias_nodes=False,
         ),
     )
     load_dataset_and_train(
@@ -1409,41 +1527,49 @@ def action_fulldata():
             min_lr=1e-3,
             epochs=10,
             weight_decay=0,
-            dataset_cases=1_000_000, #2 * 31_788_324,
+            dataset_cases=1_000_000,  # 2 * 31_788_324,
             dataset_portion_negatives=0.5,
             dataset_train_portion=0.7,
             dataset_batch_size=128,
             dataset_full=True,
-            bias_nodes=False
+            bias_nodes=False,
         ),
     )
-
 
 
 @try_except_action
 def action_baseline():
     logging.debug("Starting training of baseline - with some weight analysis")
     df0 = pd.read_pickle("object_storage/transactions.pckl")
-    data = Data_HM_Complete(total_cases=2 * 31_788_324, portion_negatives=0.5,df_transactions=df0,batch_size=128,train_portion=0.7)
+    data = Data_HM_Complete(
+        total_cases=2 * 31_788_324,
+        portion_negatives=0.5,
+        df_transactions=df0,
+        batch_size=128,
+        train_portion=0.7,
+    )
     model = load_model(baseline=True, data=data, emb_sz=500, bias=False, sparse=True)
     hyperparams = Hyperparameters(
         lr_rate=0.01,
         epochs=5,
         optimizer="SparseAdam",
+        lossfnc=torch.nn.MSELoss,
         weight_decay=0,
         embedding_size=500,
         save_loss="sparseAdam",
         bias_nodes=False,
         verbose=True,
         dataset_full=True,
-        min_lr=0.01 # So that LR doesnt change
+        min_lr=0.01,  # So that LR doesnt change
     )
     logging.debug(f"Starting training of model with parameters {hyperparams.__dict__}")
     last_validation_loss = train(
         model, data, hyperparams, baseline=True, plot_loss=True
     )
-    logging.debug(f"Model done with training (and loss plots stored to disk). Last validation loss {last_validation_loss}")
-    exit() # TODO temporary!
+    logging.debug(
+        f"Model done with training (and loss plots stored to disk). Last validation loss {last_validation_loss}"
+    )
+    exit()  # TODO temporary!
     # Prints info on the weights to log
     for parameter in model.named_parameters():
         max_value = parameter[1].detach().numpy().max()
@@ -1467,17 +1593,20 @@ def action_baseline():
 
     logging.debug("Finished action sucessfully. Exiting ...")
 
+
 @try_except_action
 def action_predvalues():
-    """ We load the model and predictions, and re-evaluate the model for the best predicitons to AFAP find the model's confidence"""
+    """We load the model and predictions, and re-evaluate the model for the best predicitons to AFAP find the model's confidence"""
     data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     baseline = True
     model = load_model(baseline=baseline, data=data, emb_sz=500, bias=True)
     mod_weights_path = load_from_gdrive(gd_id="1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8")
-    model.load_state_dict(torch.load(mod_weights_path, map_location=torch.device(device)))
+    model.load_state_dict(
+        torch.load(mod_weights_path, map_location=torch.device(device))
+    )
     os.remove(mod_weights_path)
-    with open("object_storage/preds-dec6.pckl", 'rb') as f:
+    with open("object_storage/preds-dec6.pckl", "rb") as f:
         best_predictions = pickle.load(f)
     prediction_values = {}
     logging.debug("All stuff has been loaded sucessfully.")
@@ -1485,12 +1614,14 @@ def action_predvalues():
     model.eval()
     for customer_id, article_ids in best_predictions.items():
         # logging.debug(f"{customer_id}: {article_ids[0]}")
-        article_tensor = torch.IntTensor(article_ids[0]) # Flatten list
+        article_tensor = torch.IntTensor(article_ids[0])  # Flatten list
         customer_tensor = torch.IntTensor([customer_id]).expand(article_tensor.shape[0])
         prediction = model(customer_tensor, article_tensor)
-        prediction_values[customer_id] = prediction.detach().numpy() # hopefully 12-length list
+        prediction_values[
+            customer_id
+        ] = prediction.detach().numpy()  # hopefully 12-length list
     logging.debug("Done with finding predictions. Creating plot of confidence.")
-    
+
     averages = []
     maxes = []
     for predictions in prediction_values.values():
