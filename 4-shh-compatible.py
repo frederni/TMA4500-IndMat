@@ -1,6 +1,12 @@
 # >>>>> IMPORTS
-import os, torch, importlib, functools, logging, pickle
-import numpy as np, pandas as pd
+import os
+import torch
+import importlib
+import functools
+import logging
+import pickle
+import numpy as np
+import pandas as pd
 from torch.utils.data import DataLoader, Dataset
 from typing import Tuple, Any, Iterable, Union
 from sklearn.preprocessing import LabelEncoder
@@ -8,15 +14,13 @@ from tqdm import tqdm
 from datetime import datetime
 from dataclasses import dataclass
 from collections import defaultdict
-
 import utils.metrics as metric
+import matplotlib
+import matplotlib.pyplot as plt
 
 importlib.reload(metric)  # To caputre changes in metrics module
-
-import matplotlib
-
 matplotlib.use("Agg")  # Backend for SSH runs
-import matplotlib.pyplot as plt
+
 
 # <<<<< IMPORTS
 
@@ -45,7 +49,8 @@ def clean_customer_data(df: pd.DataFrame):
 
 
 def clean_article_data(df):
-    """Helper that maps index group number `26' to 0 for easier label encoding"""
+    """Helper that maps index group number `26' to 0 for easier
+    label encoding"""
     df.loc[df["index_group_no"] == 26, "index_group_no"] = 0
     return df
 
@@ -56,8 +61,8 @@ def clean_article_data(df):
 
 
 class Data_HM(Dataset):
-    """This is the general HM Dataset class whose children are train-dataset and validation-dataset
-    no
+    """This is the general HM Dataset class whose children are train-dataset
+    and validation-dataset
 
     Args:
         Dataset: Abstract Dataset class from pyTorch
@@ -77,7 +82,9 @@ class Data_HM(Dataset):
         super().__init__()
         if train_portion is None:
             if test_portion is None:
-                raise ValueError("Both train portion and test portion cannot be None.")
+                raise ValueError(
+                    "Both train portion and test portion cannot be None."
+                    )
             self.train_portion = 1 - test_portion
         self.batch_size = batch_size
         self.df_id, self.le_cust, self.le_art = self.generate_dataset(
@@ -88,18 +95,22 @@ class Data_HM(Dataset):
         self.transform, self.target_transform = transform, target_transform
 
     def generate_dataset(
-        self, total_cases: int, portion_negatives: float, df_transactions: pd.DataFrame
+        self, total_cases: int, portion_negatives: float,
+        df_transactions: pd.DataFrame
     ) -> Tuple[pd.DataFrame, LabelEncoder, LabelEncoder]:
-        """Produce DataFrames for positive labels and generated negative samples
+        """Produce DataFrames for positive labels and generated negatives
 
         Args:
             total_cases (int): Total number of transactions
-            portion_negatives (float): The portion of the `total_cases` that should be negative. Balanced 0/1 when 0.5
-            df_transactions (pd.DataFrame): Transactions to pull samples/generate samples from
+            portion_negatives (float): The portion of the `total_cases` that
+                                    should be negative. Balanced 0/1 when 0.5
+            df_transactions (pd.DataFrame): Transactions to pull
+                                    samples/generate samples from
 
         Returns:
             Tuple[pd.DataFrame, LabelEncoder, LabelEncoder]:
-                * DataFrame on form (customer, article, label) where the IDs are label-encoded,
+                * DataFrame on form (customer, article, label) where
+                    the IDs are label-encoded,
                 * Customer and article LabelEncoder objects
         """
         assert (
@@ -111,12 +122,17 @@ class Data_HM(Dataset):
         n_positive = round(total_cases * (1 - portion_negatives))
         n_negative = total_cases - n_positive
 
-        df_positive = df_transactions.sample(n=n_positive).reset_index(drop=True)
+        df_positive = (
+            df_transactions
+            .sample(n=n_positive)
+            .reset_index(drop=True)
+            )
         df_positive = df_positive[["customer_id", "article_id"]]
         df_positive["label"] = 1
 
         # Sampling negative labels:
-        #   We select a random combination of `customer_id`, `article_id`, and ensure that this is not a true transaction.
+        #   We select a random combination of `customer_id`, `article_id`,
+        #   and ensure that this is not a true transaction.
         #   Then we make a 2-column dataframe on same form as `df_positive`
 
         df_np = df_transactions[["customer_id", "article_id"]].to_numpy()
@@ -125,7 +141,8 @@ class Data_HM(Dataset):
             legit = False
             while not legit:
                 sample = [
-                    np.random.choice(df_np[:, col]) for col in range(df_np.shape[1])
+                    np.random.choice(df_np[:, col]) for col in
+                    range(df_np.shape[1])
                 ]
                 # Checking if random sample actually exists:
                 legit = not (
@@ -136,7 +153,9 @@ class Data_HM(Dataset):
         df_negative = pd.DataFrame(neg_np, columns=df_positive.columns)
         # Return a shuffled concatenation of the two dataframes
         full_data = (
-            pd.concat((df_positive, df_negative)).sample(frac=1).reset_index(drop=True)
+            pd.concat((df_positive, df_negative))
+            .sample(frac=1)
+            .reset_index(drop=True)
         )
 
         # Make label encodings of the IDs
@@ -179,7 +198,9 @@ class Data_HM(Dataset):
         length = len(self)
         train_size = int(length * self.train_portion)
         valid_size = length - train_size
-        train, val = torch.utils.data.random_split(self, [train_size, valid_size])
+        train, val = torch.utils.data.random_split(
+            self, [train_size, valid_size]
+            )
         return train, val
 
     def get_data_from_subset(self, subset: torch.utils.data.Subset):
@@ -190,7 +211,8 @@ class Data_HM(Dataset):
         """Retrieve DataLoader object for either train or validation set.
 
         Args:
-            trainDL (bool, optional): Flag to determine which set to load. Defaults to True.
+            trainDL (bool, optional): Flag to determine which set to load.
+            Defaults to True.
 
         Returns:
             DataLoader: Torch DataLoader
@@ -225,7 +247,8 @@ class Data_HM_Complete(Data_HM):
         )
 
     def generate_dataset(
-        self, total_cases: int, portion_negatives: float, df_transactions: pd.DataFrame
+        self, total_cases: int, portion_negatives: float,
+        df_transactions: pd.DataFrame
     ) -> Tuple[pd.DataFrame, LabelEncoder, LabelEncoder]:
         logging.debug("Entered child `generate_dataset` method (expected)")
         # NB: Overrides parent method but returns the same info ...
@@ -238,12 +261,15 @@ class Data_HM_Complete(Data_HM):
         customers = df_transactions["customer_id"].unique()
         articles = df_transactions["article_id"].unique()
         n_positive = round(total_cases * (1 - portion_negatives))
-        n_negative = total_cases - n_positive  # mu inferred implicitly from here
+        n_negative = total_cases - n_positive  # mu inferred implicitly
 
         logging.debug(f"Sampling {n_positive} positives from dataframe")
-        # Lazy evalution: if we have to sample 99% of the data, we just take everything
+        # Lazy evalution: if we have to sample 99% of the data,
+        # we just take everything
         if n_positive < 0.99 * len(df_transactions):
-            positive_samples = df_transactions.sample(n=n_positive, replace=False)
+            positive_samples = df_transactions.sample(
+                n=n_positive, replace=False
+                )
         else:
             positive_samples = df_transactions
 
@@ -253,7 +279,9 @@ class Data_HM_Complete(Data_HM):
                 "customer_id": np.random.choice(
                     customers, size=n_negative, replace=True
                 ),
-                "article_id": np.random.choice(articles, size=n_negative, replace=True),
+                "article_id": np.random.choice(
+                    articles, size=n_negative, replace=True
+                ),
             }
         )
         logging.debug("Merging samples in order to remove false negatives")
@@ -265,16 +293,20 @@ class Data_HM_Complete(Data_HM):
             indicator=True,
         )
         logging.debug("Indexing out false negatives")
-        samples = samples.loc[samples["_merge"] == "left_only"].drop("_merge", axis=1)
+        samples = samples.loc[samples["_merge"] == "left_only"].drop(
+            "_merge", axis=1
+            )
 
         positive_samples["label"] = 1
         samples["label"] = 0
 
         logging.debug(
-            "Added labels. Now: concat of positive and negative plus a shuffle of all data"
+            "Added labels. Now: concat of positive and negative plus a shuffle\
+                of all data"
         )
         samples = (
-            pd.concat((positive_samples, samples)).sample(frac=1).reset_index(drop=True)
+            pd.concat((positive_samples, samples)).sample(frac=1).reset_index(
+                drop=True)
         )
 
         customers_in_sample = samples["customer_id"].unique()
@@ -320,18 +352,22 @@ class HM_model(torch.nn.Module):
     ):
         super(HM_model, self).__init__()
         self.customer_embed = torch.nn.Embedding(
-            num_embeddings=num_customer, embedding_dim=embedding_size, sparse=sparse
+            num_embeddings=num_customer, embedding_dim=embedding_size,
+            sparse=sparse
         )
         self.art_embed = torch.nn.Embedding(
-            num_embeddings=num_articles, embedding_dim=embedding_size, sparse=sparse
+            num_embeddings=num_articles, embedding_dim=embedding_size,
+            sparse=sparse
         )
         if not bias_nodes:  # Default is that we DO have biases
             # They're added lienarly so this should give no effect
             self.customer_bias = lambda row: 0
             self.article_bias = lambda row: 0
         else:
-            self.customer_bias = torch.nn.Embedding(num_customer, 1, sparse=sparse)
-            self.article_bias = torch.nn.Embedding(num_articles, 1, sparse=sparse)
+            self.customer_bias = torch.nn.Embedding(
+                num_customer, 1, sparse=sparse)
+            self.article_bias = torch.nn.Embedding(
+                num_articles, 1, sparse=sparse)
 
     def forward(self, customer_row, article_row):
         """The forward pass used in model training (matrix factorization)
@@ -350,7 +386,8 @@ class HM_model(torch.nn.Module):
         dot_prod = (customer_embed * art_embed).sum(dim=1, keepdim=True)
         # Add bias nodes to model:
         dot_prod = (
-            dot_prod + self.customer_bias(customer_row) + self.article_bias(article_row)
+            dot_prod + self.customer_bias(customer_row) +
+            self.article_bias(article_row)
         )
         return torch.sigmoid(dot_prod)
 
@@ -367,17 +404,29 @@ class HM_Extended(HM_model):
         num_garmentgroup,
         embedding_size,
         bias_nodes: bool = True,
+        sparse: bool = False,
     ):
-        super().__init__(num_customer, num_articles, embedding_size, bias_nodes)
+        super().__init__(
+            num_customer, num_articles, embedding_size, bias_nodes
+            )
+        del self.art_embed  # For model loading compatibility
+        self.article_embed = torch.nn.Embedding(
+            num_articles, embedding_size, sparse=sparse
+        )
         self.age_embed = torch.nn.Embedding(num_age, embedding_size)
-        self.indexgroup_embed = torch.nn.Embedding(num_idxgroup, embedding_size)
-        self.garmentgroup_embed = torch.nn.Embedding(num_garmentgroup, embedding_size)
+        self.indexgroup_embed = torch.nn.Embedding(
+            num_idxgroup, embedding_size
+            )
+        self.garmentgroup_embed = torch.nn.Embedding(
+            num_garmentgroup, embedding_size
+            )
 
         self.article_MLP = torch.nn.Linear(embedding_size * 3, embedding_size)
         self.customer_MLP = torch.nn.Linear(embedding_size * 2, embedding_size)
 
     def article_transform(self, article, garment_group, index_group):
-        """Concatenates each article embedding through its linear layer, activation is sigmoid"""
+        """Concatenates each article embedding through its linear layer,
+        activation is sigmoid"""
         embeds = (
             self.article_embed(article),
             self.indexgroup_embed(index_group),
@@ -387,7 +436,8 @@ class HM_Extended(HM_model):
         return torch.sigmoid(final_embedding)
 
     def customer_transform(self, customer, age):
-        """Concatenates each customer embedding through its linear layer, activation is sigmoid"""
+        """Concatenates each customer embedding through its linear layer,
+        activation is sigmoid"""
         embeds = (self.customer_embed(customer), self.age_embed(age))
         final_embedding = self.customer_MLP(torch.cat(embeds, 1))
         return torch.sigmoid(final_embedding)
@@ -402,9 +452,10 @@ class HM_Extended(HM_model):
         garment_group = garment_group - 1001
         index_group = index_group - 1
         age = age - 1
-
         customer_matrix = self.customer_transform(customer, age)
-        article_matrix = self.article_transform(article, garment_group, index_group)
+        article_matrix = self.article_transform(
+            article, garment_group, index_group
+            )
         biases = self.customer_bias(customer), self.article_bias(article)
         x = (customer_matrix * article_matrix).sum(1, keepdim=True)
         x = x + biases[0] + biases[1]
@@ -413,7 +464,9 @@ class HM_Extended(HM_model):
 
 # Class method to HM_Extended
 def _extend_row_data(
-    self: HM_Extended, customer_rows: Iterable[str], article_rows: Iterable[str]
+    self: HM_Extended,
+    customer_rows: Iterable[str],
+    article_rows: Iterable[str]
 ) -> pd.DataFrame:
     """Adds the given customer/article rows to dataset-object (not in-place)
 
@@ -430,7 +483,9 @@ def _extend_row_data(
 
     # Find original customer and article IDs present in dataset
     df_decoded = self.df_id.copy()
-    df_decoded["article_id"] = self.le_art.inverse_transform(df_decoded["article_id"])
+    df_decoded["article_id"] = self.le_art.inverse_transform(
+        df_decoded["article_id"]
+    )
     df_decoded["customer_id"] = self.le_cust.inverse_transform(
         df_decoded["customer_id"]
     )
@@ -444,8 +499,12 @@ def _extend_row_data(
         enc_articles["article_id"].isin(df_decoded["article_id"])
     ]
 
-    enc_customers["customer_id"] = self.le_cust.transform(enc_customers["customer_id"])
-    enc_articles["article_id"] = self.le_art.transform(enc_articles["article_id"])
+    enc_customers["customer_id"] = self.le_cust.transform(
+        enc_customers["customer_id"]
+    )
+    enc_articles["article_id"] = self.le_art.transform(
+        enc_articles["article_id"]
+    )
     df_ext = self.df_id.merge(enc_customers[customer_rows]).merge(
         enc_articles[article_rows]
     )
@@ -454,7 +513,8 @@ def _extend_row_data(
         pd.Index(["label"])
     )
     logging.debug(
-        f"df_id has been extended with {', '.join(customer_rows[1:]+article_rows[1:])}"
+        f"df_id has been extended with\
+            {', '.join(customer_rows[1:]+article_rows[1:])}"
     )
     return df_ext[ordered_columns]
 
@@ -499,7 +559,8 @@ def train_one_epoch(
         optimizer (_type_): Optimizer type from main call, usually Adam
         loss (_type_): Loss function, usually BCE
         verbose (bool, optional): Verbose flag, deprecated. Defaults to False.
-        baseline (bool, optional): Baseline flag (training a little different for extended moel). Defaults to True.
+        baseline (bool, optional): Baseline flag (training a little different
+                                        for extended moel). Defaults to True.
 
     Returns:
         float: Total loss for current epoch
@@ -516,12 +577,15 @@ def train_one_epoch(
             pred = model(row)
         else:
             pred = model(row[:, 0], row[:, 1])
-        loss_value = loss(pred.view(-1), torch.FloatTensor(label.tolist()).to(device))
+        loss_value = loss(pred.view(-1), torch.FloatTensor(
+            label.tolist()
+        ).to(device))
         loss_value.backward()
         optimizer.step()
         epoch_loss += loss_value
     if verbose:
-        logging.info(f"\t| Training loss for epoch {epoch_num+1}: {epoch_loss}")
+        logging.info(f"\t| Training loss for epoch\
+            {epoch_num+1}: {epoch_loss}")
     return epoch_loss
 
 
@@ -531,9 +595,11 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
     Args:
         model (HM_model | HM_Extended): Model class to train
         data (Data_HM | Data_HM_Complete): Dataset class to use
-        params (Hyperparameters): Hyperparameter container (and also some other settings)
+        params (Hyperparameters): Hyperparameter container
+                (and also some other settings)
         baseline (bool, optional): Baseline flag. Defaults to True.
-        plot_loss (bool, optional): Flag to produce loss plots to disk or not. Defaults to False.
+        plot_loss (bool, optional): Flag to produce loss plots to disk or not.
+                                    Defaults to False.
 
     Returns:
         float: Validation loss for the last (computed) epoch
@@ -543,10 +609,13 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
     loss_metric = params.lossfnc().to(device)
     if params.optimizer == "SparseAdam":
         # Does not have weight decay parameter
-        optimizer = torch.optim.SparseAdam(model.parameters(), lr=params.lr_rate)
+        optimizer = torch.optim.SparseAdam(
+            model.parameters(), lr=params.lr_rate
+        )
     else:
         optimizer = params.optimizer(
-            model.parameters(), lr=params.lr_rate, weight_decay=params.weight_decay
+            model.parameters(), lr=params.lr_rate,
+            weight_decay=params.weight_decay
         )
 
     # Adjust lr once model stops improving using scheduler
@@ -558,8 +627,9 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
     if save_loss:
         train_losses = []
         valid_losses = []
-        # `settings` just contains all hyperparameter info, to be able to distinguishs which
-        # models produce the loss plots when running multiple at the same time
+        # `settings` just contains all hyperparameter info, to be able to
+        # distinguish which models produce the loss plots when
+        # running multiple at the same time
         settings = ",".join([str(v) for v in params.__dict__.values()])
 
     for epoch in tqdm(range(params.epochs)):
@@ -596,17 +666,25 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
             if params.verbose:
                 logging.info(f"Provisory results for epoch {epoch+1}:")
                 logging.info(
-                    f"Loss for training set\t{epoch_loss.tolist() / len(dataloader_train)}"
+                    f"Loss for training set\t\
+                        {epoch_loss.tolist() / len(dataloader_train)}"
                 )
                 logging.info(
-                    f"Loss for validation set\t{valid_loss / len(dataloader_valid)}"
+                    f"Loss for validation set\t\
+                        {valid_loss / len(dataloader_valid)}"
                 )
             if save_loss:
-                train_losses.append(epoch_loss.tolist() / len(dataloader_train))
-                valid_losses.append(valid_loss / len(dataloader_valid))
+                train_losses.append(
+                    epoch_loss.tolist() / len(dataloader_train)
+                )
+                valid_losses.append(
+                    valid_loss / len(dataloader_valid)
+                )
     if save_loss:
         fn_append = save_loss if isinstance(save_loss, str) else ""
-        save_dir = os.path.join("results", datetime.today().strftime("%Y.%m.%d.%H.%M"))
+        save_dir = os.path.join("results", datetime.today().strftime(
+            "%Y.%m.%d.%H.%M"
+            ))
         if not os.path.isdir(save_dir):
             os.makedirs(save_dir)
         filename = (
@@ -626,7 +704,8 @@ def train(model, data, params, baseline: bool = True, plot_loss: bool = False):
                 save=f"{'b' if baseline else 'e'}_{settings}.pdf",
                 baseline=baseline,
             )
-            # # If you want to remove the csv files of the losses, you can call `os.remove(filename)` here
+            # # If you want to remove the csv files of the losses,
+            # # you can call `os.remove(filename)` here
             # os.remove(filename)
     return valid_loss / len(dataloader_valid)
 
@@ -639,7 +718,8 @@ def load_dataset_and_train(
     transactions_path: str = "dataset/transactions_train.csv",
     baseline: bool = True,
 ):
-    """This model loads the data files, database object and runs the train method. Will also save trained model"""
+    """This model loads the data files, database object and
+    runs the train method. Will also save trained model"""
 
     # Load data
     if use_min_dataset:
@@ -679,7 +759,8 @@ def load_dataset_and_train(
         data = Data_HM(**dataset_params)
         save_dataset_obj(
             data,
-            f"object_storage/dataset-{datetime.today().strftime('%Y.%m.%d.%H.%M')}.pckl",
+            "object_storage/dataset-" +
+            f"{datetime.today().strftime('%Y.%m.%d.%H.%M')}.pckl",
         )
     else:
         data = read_dataset_obj(persisted_dataset_path)
@@ -697,26 +778,6 @@ def load_dataset_and_train(
             os.mkdir("models")
         torch.save(model.state_dict(), os.path.join("models", save_model))
     return last_valid_loss
-
-def get_k_most_purchased(
-    k: int, transactions_path: str, pass_as_df: bool = False
-) -> pd.DataFrame:
-    if pass_as_df:
-        df = transactions_path
-    elif transactions_path.endswith("pckl"):
-        df = pd.read_pickle(transactions_path)
-    else:
-        df = pd.read_csv(transactions_path, dtype={"article_id": str})
-    return (
-        df.groupby("article_id")
-        .agg("customer_id")
-        .count()
-        .sort_values(ascending=False)
-        .head(k)
-    )
-    # Alternative:
-        # For each user, find index group for transactions it has done and get the most popular index group
-        # Return the most popular items in said index group
 
 
 def get_k_most_purchased(
@@ -774,10 +835,12 @@ def time_pd_vs_np(n_negative, df) -> Tuple[float, float]:
 
     Args:
         n_negative (int): Number of negative samples
-        df (pd.DataFrame): Dataframe to sample from, requires columns 'customer_id' and 'article_id'
+        df (pd.DataFrame): Dataframe to sample from, requires columns
+        'customer_id' and 'article_id'
 
     Returns:
-        Tuple[float, float]: Time taken using Pandas objects (first value) and NumPy objects (second value)
+        Tuple[float, float]: Time taken using Pandas objects (first value) and
+        NumPy objects (second value)
     """
     import time
 
@@ -793,13 +856,14 @@ def time_pd_vs_np(n_negative, df) -> Tuple[float, float]:
             ]
         ).flatten()
         if not (
-            (df["customer_id"] == selection[0]) & (df["article_id"] == selection[1])
-        ).any():
+            (df["customer_id"] == selection[0]) & (
+                df["article_id"] == selection[1]
+                )).any():
             tmpStr += f"{selection[0]}, {selection[1]}\n"
             num_written += 1
     with open("tmp.csv", "w") as f:
         f.write(tmpStr)
-    df_negative = pd.read_csv("tmp.csv")
+    _ = pd.read_csv("tmp.csv")
     os.remove("tmp.csv")
     time_pd = time.time() - start_pd
 
@@ -810,8 +874,12 @@ def time_pd_vs_np(n_negative, df) -> Tuple[float, float]:
     for i in range(n_negative):
         legit = False
         while not legit:
-            sample = [np.random.choice(df_np[:, col]) for col in range(df_np.shape[1])]
-            legit = not ((df_np[:, 0] == sample[0]) & (df_np[:, 1] == sample[1])).any()
+            sample = [np.random.choice(
+                df_np[:, col]
+            ) for col in range(df_np.shape[1])]
+            legit = not (
+                (df_np[:, 0] == sample[0]) & (df_np[:, 1] == sample[1])
+            ).any()
         neg_np[i, :] = sample
     time_np = time.time() - start_np
 
@@ -832,10 +900,12 @@ def plot_negative_sampling(
         start (int): Range of n_negative (inclusive)
         stop (int): Range of n_negative (exclusive)
         step (int, optional): Step in range of n_negative. Defaults to 1.
-        filename (str | None, optional): Plot output file name, if None, does not save file. Defaults to None.
-        persist_data (bool, optional): Serialization option to store each iterate's result. Defaults to True.
-        cont_from_checkpoint (bool, optional): Reads previous runs and doesn't recompute if done before.
-                                                Defaults to True.
+        filename (str | None, optional): Plot output file name, if None,
+                                    does not save file. Defaults to None.
+        persist_data (bool, optional): Serialization option to store each
+                                        iterate's result. Defaults to True.
+        cont_from_checkpoint (bool, optional): Reads previous runs and doesn't
+                                recompute if done before. Defaults to True.
     """
     import matplotlib.pyplot as plt
     from tqdm import tqdm
@@ -902,10 +972,12 @@ def read_dataset_obj(src: str) -> Any:
 def load_kaggle_assets(
     to_download: Union[Iterable[str], None] = None
 ) -> Iterable[pd.DataFrame]:
-    """Downloads data from Kaggle competition, loads to Dataframes and deletes original files. Made due to low disk quota on server
+    """Downloads data from Kaggle competition, loads to Dataframes and deletes
+    original files. Made due to low disk quota on server
 
     Args:
-        to_download (list[str] | None, optional): List of files to download, if None will download all csv files. Defaults to None.
+        to_download (list[str] | None, optional): List of files to download,
+        if None will download all csv files. Defaults to None.
 
     Returns:
         list[pd.DataFrame]: Dataframes from downloaded files
@@ -917,13 +989,16 @@ def load_kaggle_assets(
     api = KaggleApi()
     api.authenticate()
     if to_download is None:
-        to_download = ["customers.csv", "transactions_train.csv", "articles.csv"]
+        to_download = [
+            "customers.csv", "transactions_train.csv", "articles.csv"
+        ]
     pd_objects = []
 
     for i, file in enumerate(to_download):
         logging.debug(f"Downlodaing file {file}")
         api.competition_download_file(
-            competition="h-and-m-personalized-fashion-recommendations", file_name=file
+            competition="h-and-m-personalized-fashion-recommendations",
+            file_name=file
         )
 
         zf = ZipFile(f"{file}.zip")
@@ -950,7 +1025,8 @@ def load_from_gdrive(gd_id: str, outpath: str = "tmp_model.pth") -> None:
     gdown.download(id=gd_id, output=outpath)
     assert os.path.isfile(outpath), "Unable to fine downloaded file!"
     logging.debug(
-        "Sucessfully downloaded pth file. Make sure to remove after loading to memory"
+        "Sucessfully downloaded pth file. Make sure to remove after loading" +
+        " to memory"
     )
     return outpath
 
@@ -962,14 +1038,19 @@ def load_model(
     bias: bool = True,
     sparse: bool = False,
 ) -> object:
-    """Based on baseline flag, retrieves model and ensures column types are correct.
+    """Based on baseline flag, retrieves model and ensures
+    column types are correct.
 
     Args:
         baseline (bool): Baseline flag
-        data (Data_HM): Original Dataset object (NB self.df_id can be modified when passed).
-        emb_sz (int, optional): Embedding size, must match size in `data`. Defaults to 500.
-        bias (bool, optional): Bias flags (include bias nodes or not). Defaults to True.
-        sparse (bool, optional): Sparse property to model embeddings. Defaults to False
+        data (Data_HM): Original Dataset object (NB self.df_id can be
+        modified when passed).
+        emb_sz (int, optional): Embedding size, must match size in `data`.
+        Defaults to 500.
+        bias (bool, optional): Bias flags (include bias nodes or not).
+        Defaults to True.
+        sparse (bool, optional): Sparse property to model embeddings.
+        Defaults to False
 
     Returns:
         object: HM_model or HM_Extended
@@ -978,7 +1059,8 @@ def load_model(
     n_cust, n_art, *_ = data.df_id.nunique()
     if baseline:
         model = HM_model(
-            n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias, sparse=sparse
+            n_cust, n_art, embedding_size=emb_sz, bias_nodes=bias,
+            sparse=sparse
         ).to(device)
     else:
         additional_columns = {"age", "garment_group_no", "index_group_no"}
@@ -994,7 +1076,9 @@ def load_model(
                 data, ["age"], ["garment_group_no", "index_group_no"]
             )
         # age/idxgroup/ggroup have to be the max instead of nunique
-        n_age, n_idxgroup, n_garmentgroup = data.df_id.max()[2:5].values.astype(int)
+        n_age, n_idxgroup, n_garmentgroup = (
+            data.df_id.max()[2:5].values.astype(int)
+        )
 
         model = HM_Extended(
             num_customer=n_cust,
@@ -1018,11 +1102,16 @@ def plot_loss_results(
     """Generate plot of training and/or validation loss across trained epochs
 
     Args:
-        lossfile (str): Path to csv file containing training and validation losses
-        which (str, optional): Which plot to make (training, validation, all). Defaults to "all".
-        plot_title (bool, optional): Title flag. Won't use any titles if False. Defaults to True.
-        save (Union[str, None], optional): Destination path for plot. Won't save to disk of None. Defaults to None.
-        baseline (bool, optional): Baseline flag (assumes model=='extended' if False). Defaults to True.
+        lossfile (str): Path to csv file containing training
+            and validation losses
+        which (str, optional): Which plot to make (training, validation, all).
+            Defaults to "all".
+        plot_title (bool, optional): Title flag. Won't use any titles if False.
+            Defaults to True.
+        save (Union[str, None], optional): Destination path for plot.
+            Won't save to disk of None. Defaults to None.
+        baseline (bool, optional): Baseline flag
+            (assumes model=='extended' if False). Defaults to True.
     """
     res = pd.read_csv(lossfile, header=None)
     plt.figure()
@@ -1051,16 +1140,19 @@ def compare_hyperparameter_results(data: Iterable[str]):
         plt.ylabel("Loss value")
         res = pd.read_csv(results_fn, header=None)
         setting = results_fn[
-            results_fn.find("_") + 1 :
+            results_fn.find("_") + 1:
         ]  # Retrieves filename more or less
         variable = setting.split("=")[0]
-        # Here we just iterate through Hyperparam. choices and stores the function call for later use
+        # Here we just iterate through Hyperparam. choices and
+        # store the function call for later use
         if variable in plt_calls:
             plt_calls[variable].append(
                 functools.partial(plt.plot, res[0], label=setting)
             )
         else:
-            plt_calls[variable] = [functools.partial(plt.plot, res[0], label=setting)]
+            plt_calls[variable] = [
+                functools.partial(plt.plot, res[0], label=setting)
+            ]
 
     # Iterate through previously established function calls and plots
     for var, cmd_list in plt_calls.items():
@@ -1074,7 +1166,8 @@ def compare_hyperparameter_results(data: Iterable[str]):
 
 
 def explore_hyperparameters():
-    """Runs model for different choices of weight decay, embedding size and learn rate"""
+    """Runs model for different choices of weight decay,
+    embedding size and learn rate"""
     weight_decays = (1e-4, 1e-3, 1e-2, 1e-1)
     embedding_size = (10, 100, 500, 1000, int(1e4))
     lr_rates = (1e-5, 1e-4, 1e-3, 1e-2)
@@ -1082,9 +1175,13 @@ def explore_hyperparameters():
     for emb_size in embedding_size:
         testing_param = f"{emb_size = }"
         print(testing_param)
-        hparams = Hyperparameters(embedding_size=emb_size, save_loss=testing_param)
+        hparams = Hyperparameters(
+            embedding_size=emb_size,
+            save_loss=testing_param
+        )
         load_dataset_and_train(
-            persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams
+            persisted_dataset_path="object_storage/HM_data.pckl",
+            hyperparams=hparams
         )
     print("Testing WEIGHT DECAYS")
     for wd in weight_decays:
@@ -1092,14 +1189,16 @@ def explore_hyperparameters():
         print(testing_param)
         hparams = Hyperparameters(weight_decay=wd, save_loss=testing_param)
         load_dataset_and_train(
-            persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams
+            persisted_dataset_path="object_storage/HM_data.pckl",
+            hyperparams=hparams
         )
     for lr in lr_rates:
         testing_param = f"{lr = }"
         print(testing_param)
         hparams = Hyperparameters(lr_rate=lr, save_loss=testing_param)
         load_dataset_and_train(
-            persisted_dataset_path="object_storage/HM_data.pckl", hyperparams=hparams
+            persisted_dataset_path="object_storage/HM_data.pckl",
+            hyperparams=hparams
         )
 
 
@@ -1118,14 +1217,17 @@ def alternative_hyperparam_exploration(
     dataset_path=None,
     baseline: bool = True,
 ) -> dict:
-    """Checks each combination of choices and prints out the one with best validation loss
+    """Checks each combination of choices and prints out the one
+    with best validation loss
 
     Args:
         wds (Iterable): List of weight decay
         embszs (Iterable): List of embedding sizes
         lrs (Iterable): List of learning rates
-        dataset_path (str|None, optional): Path to dataset instance, if None will generate a new each time. Defaults to None.
-        baseline (bool, optional): Flag if model to test is the baseline or extended. Defaults to True.
+        dataset_path (str|None, optional): Path to dataset instance,
+            if None will generate a new each time. Defaults to None.
+        baseline (bool, optional): Flag if model to test is the
+            baseline or extended. Defaults to True.
 
     Returns:
         dict: dictionary of parameter choices corresponding to best model
@@ -1145,7 +1247,9 @@ def alternative_hyperparam_exploration(
                     "validation_frequency": 1,
                 }
                 logging.debug(
-                    f"Training 20 epochs of {'baseline' if baseline else 'extended'} model. Settings: {lr = }, {wd = }, {emb_size = }"
+                    "Training 20 epochs of " +
+                    f"{'baseline' if baseline else 'extended'} model." +
+                    f"Settings: {lr = }, {wd = }, {emb_size = }"
                 )
                 loss = load_dataset_and_train(
                     persisted_dataset_path=dataset_path,
@@ -1163,7 +1267,9 @@ def alternative_hyperparam_exploration(
 
 def split_test_set_file():
     """Method to make a 70-30 split in dataset, not in use"""
-    full_set = pd.read_csv("dataset/transactions_train.csv", dtype={"article_id": str})
+    full_set = pd.read_csv(
+        "dataset/transactions_train.csv", dtype={"article_id": str}
+    )
     num_train = int(len(full_set) * 0.7)
     num_test = len(full_set) - num_train
     test_idx = np.random.randint(0, len(full_set), size=num_test)
@@ -1178,11 +1284,16 @@ def split_test_set_file():
 
 
 def predictions_aggregator(data: Data_HM, by_index: bool = True):
-    """Get k top predictions for customer only based on what index group it has the most purchases in"""
+    """Get k top predictions for customer only based on
+    what index group it has the most purchases in"""
     if not by_index:
         df = data.df_id[data.df_id["label"] == 1].drop("label", axis=1)
         top_predictions = get_k_most_purchased(12, df).tolist()
-        return {customer: [top_predictions] for customer in df["customer_id"].unique()}
+        return {
+            customer: [top_predictions] for customer in df[
+                "customer_id"
+            ].unique()
+            }
 
     df = _extend_row_data(data, [], ["index_group_no"])  # df_id
     train = data.get_data_from_subset(data.train)  # train set of df_id
@@ -1203,12 +1314,19 @@ def predictions_aggregator(data: Data_HM, by_index: bool = True):
     }
     logging.debug(top_predictions)
     best_preds = {}
-    group = df.groupby("customer_id").agg({"index_group_no": list}).reset_index()
+    group = (
+        df
+        .groupby("customer_id")
+        .agg({"index_group_no": list})
+        .reset_index()
+    )
     group["index_group_no"] = group["index_group_no"].apply(
         lambda lst: max(set(lst), key=lst.count)
     )
     for idx, row in group.iterrows():
-        best_preds[row.customer_id] = [top_predictions[row.index_group_no].tolist()]
+        best_preds[row.customer_id] = [
+            top_predictions[row.index_group_no].tolist()
+        ]
 
     return best_preds
 
@@ -1222,8 +1340,9 @@ def topk_for_all_customers(
     n_customer_threshold: int = 100,
     remove_pth_file_after_load: bool = False,
 ) -> dict:
-    """Make dictionary on form {customer: [art_1, ..., art_k]} for k highest predicted articles,
-    for each customer and article in the *validation set*"""
+    """Make dictionary on form {customer: [art_1, ..., art_k]}
+    for k highest predicted articles, for each customer and article
+    in the *validation set*"""
 
     def _update_out_dict(all_preds: defaultdict):
         """Helper to add predictions to out_dict"""
@@ -1234,16 +1353,48 @@ def topk_for_all_customers(
             top_ind = np.argpartition(values_i, -k_i)[-k_i:]
             out_dict[customer_dict] = [keys_i[top_ind].tolist()]
 
+    def iterate_through_extended_model(all_preds: defaultdict):
+        """Internal method if predictions are not for baseline"""
+        logging.debug("Entered extended iterating method")
+        customer_count = 0
+        for customer_row in tqdm(valid_customers):
+            customer_i = customer_row[0].item()  # Don't include age data
+            customer_count += 1
+            for article_rows in valid_articles:
+                # TODO might need row = row.int()
+                bz = article_rows.shape[0]
+                customer_rows = customer_row.expand(bz, 2)
+                row = torch.concat(
+                    (
+                        customer_rows[:, 0].reshape((bz, 1)),
+                        article_rows[:, 0].reshape((bz, 1)),
+                        customer_rows[:, 1].reshape((bz, 1)),
+                        article_rows[:, 1:].reshape((bz, 2)),
+                    ),
+                    dim=1,
+                )
+                pred = model(row).view(-1)
+                for i, pred_i in enumerate(pred):
+                    article_i = row[i, 1].item()
+                    all_preds[customer_i][article_i] = pred_i
+            if customer_count % n_customer_threshold == 0:
+                # Clears all predictions again to save memory
+                logging.debug("(new) Sending batch to out dict...")
+                _update_out_dict(all_preds)
+                # Free memory and re-initiate defaultdict
+                del all_preds
+                all_preds = defaultdict(dict)
+
     # Initialize model and dataset
-    num_customer, num_articles = test_data.df_id.nunique().values[:2]
     all_preds = defaultdict(
         dict
-    )  # Essentially a 2D-dict: https://docs.python.org/3/library/collections.html#collections.defaultdict
-    # Best preds now just finds the label-encoded stuff since we already have LF on those
+    )  # Essentially a 2D-dict, see `collections.defaultdict`
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_model(baseline, test_data, emb_sz=500)
-    model.load_state_dict(torch.load(model_path, map_location=torch.device(device)))
+    model.load_state_dict(torch.load(
+        model_path, map_location=torch.device(device)
+    ))
     if remove_pth_file_after_load:
         logging.info(f"Removing pth-file {model_path}")
         os.remove(model_path)
@@ -1251,7 +1402,17 @@ def topk_for_all_customers(
 
     # Access validation data
     data = test_data.get_data_from_subset(test_data.val).to_numpy()
-    valid_customers, valid_articles = np.unique(data[:, 0]), np.unique(data[:, 1])
+    if not baseline:
+        _, customer_idx = np.unique(data[:, 0], return_index=True)
+        valid_customers = data[customer_idx, :]
+        valid_customers = valid_customers[:, [0, 2]]  # customer id and age
+        logging.debug(f"Customers with age component,\n{valid_customers}")
+        _, article_idx = np.unique(data[:, 1], return_index=True)
+        valid_articles = data[article_idx, :]
+        valid_articles = valid_articles[:, [1, 3, 4]]  # article data
+    else:
+        valid_customers = np.unique(data[:, 0])
+        valid_articles = np.unique(data[:, 1])
     valid_customers, valid_articles = torch.IntTensor(valid_customers).to(
         device
     ), torch.IntTensor(valid_articles).to(device)
@@ -1263,22 +1424,28 @@ def topk_for_all_customers(
     )
     out_dict = dict()
     logging.info("Computing predictions for customers ...")
-    customer_count = 0
-    for customer in tqdm(valid_customers):
-        customer_count += 1
-        for article in valid_articles:
-            # For customer 3, we pass model([3, 3, ..., 3], [a1, a2, ..., an])
-            customer_exp = customer.expand(article.shape[0])
-            pred = model(customer_exp, article).view(-1)
-            for i, pred_i in enumerate(pred):
-                all_preds[customer.item()][article[i]] = pred_i
-        if customer_count % n_customer_threshold == 0:
-            # Clears all predictions again to save memory
-            logging.debug("Sending batch to out dict...")
-            _update_out_dict(all_preds)
-            # Free memory and re-initiate defaultdict
-            del all_preds
-            all_preds = defaultdict(dict)
+    if not baseline:
+        iterate_through_extended_model(
+            all_preds
+        )  # model,valid_customers,test_data,n_customer_threshold,all_preds)
+    else:
+        logging.debug("Entered iteration through baseline data")
+        customer_count = 0
+        for customer in tqdm(valid_customers):
+            customer_count += 1
+            for article in valid_articles:
+                # For customer 3, we pass model([3, ..., 3], [a1, ..., an])
+                customer_exp = customer.expand(article.shape[0])
+                pred = model(customer_exp, article).view(-1)
+                for i, pred_i in enumerate(pred):
+                    all_preds[customer.item()][article[i]] = pred_i
+            if customer_count % n_customer_threshold == 0:
+                # Clears all predictions again to save memory
+                logging.debug("Sending batch to out dict...")
+                _update_out_dict(all_preds)
+                # Free memory and re-initiate defaultdict
+                del all_preds
+                all_preds = defaultdict(dict)
 
     # Call this once more for the last n<n_customer_threshold customers
     _update_out_dict(all_preds)
@@ -1292,16 +1459,20 @@ def compute_map(
     k: int = 12,
     use_all_data_as_ground_truth: bool = False,
 ) -> pd.DataFrame:
-    """Compute average precision @k for predicted entries `out_dict` from previous function
+    """Compute average precision @k for predicted entries
+    `out_dict` from previous function
 
     Args:
-        best_preds (dict): Output dictionary from topk_from_all_customers function
+        best_preds (dict): Output dictionary from
+                topk_from_all_customers function
         test_data (Data_HM): Dataset object
         k (int, optional): Cutoff. Defaults to 12.
-        use_all_data_as_ground_truth (bool, optional): Bool flag, if False will only consider validation set. Defaults to False.
+        use_all_data_as_ground_truth (bool, optional): Bool flag, if False
+                will only consider validation set. Defaults to False.
 
     Returns:
-        pd.DataFrame: Average precision for all customers such that its .mean() is the MAP@k value
+        pd.DataFrame: Average precision for all customers such that its
+        .mean() is the MAP@k value
     """
     if use_all_data_as_ground_truth:
         logging.debug("Returning best predicted values back to true IDs ...")
@@ -1315,7 +1486,8 @@ def compute_map(
         # Ground truth from entire database:
         logging.debug("Reading ground truth ...")
         ground_truth = pd.read_pickle("object_storage/transactions.pckl")
-        # ground_truth = pd.read_csv( # Alternative method if csv is stored to disk.
+        # # Alternative method if csv is stored to disk.
+        # ground_truth = pd.read_csv(
         #     "dataset/transactions_train.csv",
         #     dtype={"article_id": str},
         #     usecols=["customer_id", "article_id"],
@@ -1326,12 +1498,16 @@ def compute_map(
         ]
         logging.debug("Grouping ground truth by customer")
         ground_truth = (
-            ground_truth.groupby("customer_id").agg({"article_id": list}).reset_index()
+            ground_truth
+            .groupby("customer_id")
+            .agg({"article_id": list})
+            .reset_index()
         )
         logging.debug(f"Head of ground_truth\n{ground_truth.head()}")
     else:
         logging.debug("Loading only data in validation set")
-        ground_truth = (  # This only checks the true values of the (training and) validation set
+        # This only checks the true values of the (training and) validation set
+        ground_truth = (
             test_data.df_id[test_data.df_id["label"] == 1]
             .groupby("customer_id")
             .agg({"article_id": list})
@@ -1351,9 +1527,9 @@ def compute_map(
     merged = ground_truth.merge(preds)
     # Just having a look making sure everything looks good with the new thing
     logging.debug(f"Columns of merged DF: {merged.columns}")
-    logging.debug(f"Merged has length {len(merged)} and preds had {len(preds)}.")
-    ##
-    from utils.metrics import prec, rel
+    logging.debug(
+        f"Merged has length {len(merged)} and preds had {len(preds)}."
+    )
 
     logging.debug("Computing MAP ...")
     # Compute average precision here
@@ -1362,14 +1538,15 @@ def compute_map(
         ap = 0
         truth = np.array(row.article_id)
         preds = np.array(row.est_article_id)
-        for i in range(1, 12 + 1):  # range(1,k+1):
+        for i in range(1, k + 1):
             if preds[i - 1] in truth:
                 ap = ap + len(np.intersect1d(preds[:i], truth)) / i
         average_precision[row_num] = ap / min(
             k, len(row.est_article_id), len(row.article_id)
         )
 
-    # Returns average precision for each customer instead of taking the mean (== MAP@k)
+    # Returns average precision for each customer instead of taking the mean,
+    # which gives us MAP@k
     return average_precision
 
 
@@ -1383,7 +1560,9 @@ def try_except_action(action):
         except Exception as e:
             logging.exception(f"Exception in {action_name}!\n{e}")
         else:
-            logging.deug(f"Successfully done with action {action_name}. Exiting ...")
+            logging.deug(
+                f"Successfully done with action {action_name}. Exiting ..."
+                )
         finally:
             return None
 
@@ -1417,6 +1596,8 @@ def action_map():
     data = read_dataset_obj(
         "object_storage/dataset-2022.11.26.12.04.pckl"
     )  # 200k samples
+    # # Computes MAP for aggregation predictions first.
+    # First: aggregation not index group-based
     res_simple_agg_full = compute_map(
         predictions_aggregator(data, by_index=False), data, 12, True
     )
@@ -1424,51 +1605,62 @@ def action_map():
         predictions_aggregator(data, by_index=False), data, 12, False
     )
     logging.info(
-        f"With all data: {res_simple_agg_full.mean()}, with validation data: {res_simple_agg_valid.mean()}."
+        f"With all data: {res_simple_agg_full.mean()}, with validation data:" +
+        f" {res_simple_agg_valid.mean()}."
     )
-    exit()
+
     res = compute_map(predictions_aggregator(data), data, 12, True)
     logging.info(f"With all data: {res.mean()}")
     res = compute_map(predictions_aggregator(data), data, 12, False)
     logging.info(f"With validation only: {res.mean()}")
-    exit()
-    logging.debug("Loaded predictions from file. Computing first MAP with all data")
-    map_from_full_data = compute_map(
-        predictions_dict, data, use_all_data_as_ground_truth=True
-    )
-    logging.debug("Computing second MAP, not with all data")
-    map_from_validation = compute_map(
-        predictions_dict, data, use_all_data_as_ground_truth=False
-    )
-    logging.debug(f"With all data: {map_from_full_data.mean()}")
-    logging.debug(f"With validation only: {map_from_validation.mean()}")
-    exit()
-    ### Gutta backer
+
     for name, model in zip(
         ["baseline", "extended"],
-        ["1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8", "1-t_jh7ajCUZRSm2EwUK4cLqAcZ2-Q6zK"],
+        [
+            "1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8",
+            "1-t_jh7ajCUZRSm2EwUK4cLqAcZ2-Q6zK"
+        ],
     ):
+        baseline_bool = name == "baseline"
         logging.debug(f"Downloading {name} model from drive...")
-        mod_weights_path = load_from_gdrive(gd_id="1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8")
+        mod_weights_path = load_from_gdrive(gd_id=model)
+        from time import perf_counter
+
+        time_start = perf_counter()
         predictions_dict = topk_for_all_customers(
             mod_weights_path,
             test_data=data,
             n_customer_threshold=200,
             remove_pth_file_after_load=True,
-            baseline=True,
+            baseline=baseline_bool,
         )
+        logging.info(
+            "Time spent finding the top k for " +
+            f"{'baseline' if baseline_bool else 'extended'} model: " +
+            f"{perf_counter() - time_start} seconds."
+        )
+        # Seemed to be OS-related issues to storing this, hence the try block
         try:
-            save_dataset_obj(predictions_dict, "object_storage/preds-dec6.pckl")
+            save_dataset_obj(
+                predictions_dict, "object_storage/preds-dec18.pckl"
+            )
         except Exception as e:
-            logging.exception(f"Unable to store predictions dict for some reason!\n{e}")
-            logging.exception("Falling back on ugly solution under debug.")
-            logging.debug(predictions_dict)
+            logging.exception(
+                f"Unable to store predictions dict for some reason!\n{e}"
+            )
+            logging.exception("Using fallback which is to paste all data:")
+            logging.debug(f"\n{predictions_dict}")
         logging.debug("Finished making predictions, now computing MAP")
         average_precision = compute_map(
             predictions_dict, data, use_all_data_as_ground_truth=False
         )
-        logging.debug(average_precision)
         logging.info(f"Computed MAP: {average_precision.mean()}")
+        average_precision = compute_map(
+            predictions_dict, data, use_all_data_as_ground_truth=True
+        )
+        logging.info(
+            f"Now with full data: Computed MAP: {average_precision.mean()}"
+        )
 
 
 @try_except_action
@@ -1492,7 +1684,7 @@ def action_savemodel():
 
 @try_except_action
 def action_fulldata():
-    # Baseline iwth full data
+    # Baseline with full data - a couple of different settings
     load_dataset_and_train(
         transactions_path="object_storage/transactions.pckl",
         hyperparams=Hyperparameters(
@@ -1561,6 +1753,7 @@ def action_fulldata():
 def action_baseline():
     logging.debug("Starting training of baseline - with some weight analysis")
     df0 = pd.read_pickle("object_storage/transactions.pckl")
+    # Current data loads full dataset
     data = Data_HM_Complete(
         total_cases=2 * 31_788_324,
         portion_negatives=0.5,
@@ -1568,7 +1761,11 @@ def action_baseline():
         batch_size=128,
         train_portion=0.7,
     )
-    model = load_model(baseline=True, data=data, emb_sz=500, bias=False, sparse=True)
+    # Baseline model with \gamma = 0.01, \lambda = 0, n_emb = 500,
+    # no bias nodes, embeddings sparse, sparseAdam optimizer
+    model = load_model(
+        baseline=True, data=data, emb_sz=500, bias=False, sparse=True
+    )
     hyperparams = Hyperparameters(
         lr_rate=0.01,
         epochs=5,
@@ -1580,16 +1777,18 @@ def action_baseline():
         bias_nodes=False,
         verbose=True,
         dataset_full=True,
-        min_lr=0.01,  # So that LR doesnt change
+        min_lr=0.01,  # So that LR don't decrement dynamically
     )
-    logging.debug(f"Starting training of model with parameters {hyperparams.__dict__}")
+    logging.debug(
+        f"Starting training of model with parameters {hyperparams.__dict__}"
+        )
     last_validation_loss = train(
         model, data, hyperparams, baseline=True, plot_loss=True
     )
     logging.debug(
-        f"Model done with training (and loss plots stored to disk). Last validation loss {last_validation_loss}"
+        "Model done with training (and loss plots stored to disk). " +
+        f"Last validation loss {last_validation_loss}"
     )
-    exit()  # TODO temporary!
     # Prints info on the weights to log
     for parameter in model.named_parameters():
         max_value = parameter[1].detach().numpy().max()
@@ -1598,13 +1797,21 @@ def action_baseline():
     del model  # Ensuring the weights aren't part of new model
     model = load_model(baseline=True, data=data, emb_sz=500, bias=False)
     hyperparams = Hyperparameters(
-        lr_rate=1e-2, weight_decay=0, embedding_size=500, save_loss=True, verbose=True
+        lr_rate=1e-2,
+        weight_decay=0,
+        embedding_size=500,
+        save_loss=True,
+        verbose=True
     )
-    logging.debug(f"Starting training of model with parameters {hyperparams.__dict__}")
+    logging.debug(
+        f"Starting training of model with parameters {hyperparams.__dict__}"
+        )
     last_validation_loss = train(
         model, data, hyperparams, baseline=True, plot_loss=True
     )
-    logging.debug("Second model done with training (and loss plots stored to disk)")
+    logging.debug(
+        "Second model done with training (and loss plots stored to disk)"
+        )
 
     # Prints info on the weights to log
     for parameter in model.named_parameters():
@@ -1616,12 +1823,15 @@ def action_baseline():
 
 @try_except_action
 def action_predvalues():
-    """We load the model and predictions, and re-evaluate the model for the best predicitons to AFAP find the model's confidence"""
+    """We load the model and predictions, and re-evaluate the model
+    for the best predicitons to AFAP find the model's confidence"""
     data = read_dataset_obj("object_storage/dataset-2022.11.26.12.04.pckl")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     baseline = True
     model = load_model(baseline=baseline, data=data, emb_sz=500, bias=True)
-    mod_weights_path = load_from_gdrive(gd_id="1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8")
+    mod_weights_path = load_from_gdrive(
+        gd_id="1L8VmsQ3dRedgheUIAREvLBuH0PFxwTG8"
+        )
     model.load_state_dict(
         torch.load(mod_weights_path, map_location=torch.device(device))
     )
@@ -1633,14 +1843,16 @@ def action_predvalues():
 
     model.eval()
     for customer_id, article_ids in best_predictions.items():
-        # logging.debug(f"{customer_id}: {article_ids[0]}")
         article_tensor = torch.IntTensor(article_ids[0])  # Flatten list
-        customer_tensor = torch.IntTensor([customer_id]).expand(article_tensor.shape[0])
+        customer_tensor = torch.IntTensor([customer_id]).expand(
+            article_tensor.shape[0]
+        )
         prediction = model(customer_tensor, article_tensor)
-        prediction_values[
-            customer_id
-        ] = prediction.detach().numpy()  # hopefully 12-length list
-    logging.debug("Done with finding predictions. Creating plot of confidence.")
+        # Make 12-length list
+        prediction_values[customer_id] = prediction.detach().numpy()
+    logging.debug(
+        "Done with finding predictions. Creating plot of confidence."
+        )
 
     averages = []
     maxes = []
@@ -1652,7 +1864,7 @@ def action_predvalues():
     plt.legend()
     plt.xlabel("Customer index ID")
     plt.ylabel("Confidence (0%-100%)")
-    save_path = "average_prediction_confidence.pdf"
+    save_path = "average_prediction_confidence.png"
     plt.savefig(save_path)
     logging.debug(f"Saved plot to {save_path}")
 
@@ -1660,8 +1872,8 @@ def action_predvalues():
 if __name__ == "__main__":
 
     logging.basicConfig(
-        filename="markov_run.log",
-        # encoding="utf-8", # Not present in Python 3.8...
+        filename="ssh_run.log",
+        # encoding="utf-8", # Not present in Python 3.8 so commented out
         level=logging.DEBUG,
         format="%(asctime)s %(levelname)s %(message)s",
     )
@@ -1672,7 +1884,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     action = args.action
     logging.debug(f"4-shh-compatible called with action flag: {action}")
-    possible_actions = "(hyperparams, map, savemodel, baseline, fulldata, predvalues)"
+    possible_actions = (
+        "(hyperparams, map, savemodel, baseline, fulldata, predvalues)"
+    )
 
     if action == "hyperparams":
         action_hyperparams()
