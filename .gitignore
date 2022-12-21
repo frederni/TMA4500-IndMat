@@ -7,7 +7,7 @@ etc
 
 object_storage/
 results/
-
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
