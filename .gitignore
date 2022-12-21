@@ -5,6 +5,10 @@ share/
 pyvenv.cfg
 etc
 
+object_storage/
+results/
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
