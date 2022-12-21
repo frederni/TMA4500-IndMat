@@ -12,5 +12,9 @@ The explorative project focused on recommender systems for retail data, in parti
     1) Recommend the *k* most purchased items for all customers
     2) Recommend the *k* most purchased items within each user's most popular `index_group_no`
     3) Baseline machine learning model with transactional data
-    4) Extension to model above, connecting side information with multilayer perceptron
+    4) Extension to model above, connecting side information with multilayer perceptron*
 * `utils/metrics.py`: Implementation of the MAP@12 metric
+
+
+*The architecutre of this model is as follows:
+![bilde](https://user-images.githubusercontent.com/23258333/208921023-dd4a38ed-b54f-4486-b4d2-1e07103fdaeb.png)
